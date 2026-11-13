@@ -58,6 +58,8 @@ export function useApi<T>(path: string): { data?: T; error?: string; loading: bo
   return { data, error, loading, reload };
 }
 
+export const enc = encodeURIComponent;
+
 export const COURSE_COLORS = ["c1", "c2", "c3", "c4", "c5", "c6", "c7"] as const;
 export const COLOR_NAMES: Record<string, string> = {
   c1: "Clay", c2: "Ochre", c3: "Sage", c4: "Teal", c5: "Slate blue", c6: "Heather", c7: "Rose",

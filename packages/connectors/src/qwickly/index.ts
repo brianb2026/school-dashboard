@@ -1,28 +1,27 @@
-import { NotImplementedYet, type Connector } from "../types.js";
+import type { Connector } from "../types.js";
+import { REST_TOKENS } from "../blackboard/rest.js";
+import { SESSION_COOKIES } from "../blackboard/session.js";
 
 /**
- * Qwickly Attendance runs inside Blackboard as an LTI tool, so there is no
- * separate login and no public student API.
- *
- * Plan:
- *   1. Qwickly can push attendance into the Blackboard gradebook as a column
- *      (often named "Qwickly Attendance" or "Attendance"). The Blackboard
- *      connector exposes that column; this module turns it into an
- *      attendance percentage per course.
- *   2. If your instructor doesn't sync it: a quick "I checked in" log you tap
- *      after each class, plus counts you copy from the Qwickly student view.
+ * Qwickly Attendance runs inside Blackboard as an LTI tool: no separate login
+ * and no student API. When the instructor syncs it to the gradebook it shows
+ * up as a column ("Qwickly Attendance" / "Attendance"), and the Blackboard
+ * sync turns that column into your attendance percentage (see mapGradebook).
+ * So there is nothing to fetch here; this entry only reports where the
+ * numbers come from. For classes that don't sync it, the Attendance view has
+ * a one-tap check-in log.
  */
-export const ATTENDANCE_COLUMN = /\b(qwickly|attendance)\b/i;
-
 export const qwickly: Connector = {
   id: "qwickly",
   label: "Qwickly attendance",
   capabilities: ["attendance"],
-  async status() {
-    // Becomes "ready" once the Blackboard grade connector (v0.3) provides the attendance column.
-    return { state: "not-configured", detail: "Arrives with Blackboard grades (v0.3)" };
+  async status(ctx) {
+    const linked = (await ctx.secrets.get(SESSION_COOKIES)) || (await ctx.secrets.get(REST_TOKENS));
+    return linked
+      ? { state: "ready", detail: "Read from the attendance column in Blackboard grades" }
+      : { state: "not-configured", detail: "Comes in with Blackboard once it is linked" };
   },
   async sync() {
-    throw new NotImplementedYet("Qwickly attendance mapping");
+    return {};
   },
 };

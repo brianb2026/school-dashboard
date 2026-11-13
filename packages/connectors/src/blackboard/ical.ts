@@ -1,4 +1,6 @@
-import { matchCourse, type Assignment, type AssignmentKind } from "@sd/core";
+import { matchCourse, type Assignment } from "@sd/core";
+import { guessKind } from "../kinds.js";
+import { isLoopback, readCapped } from "../net.js";
 import type { Connector, ConnectorContext, SyncResult } from "../types.js";
 
 /**
@@ -50,16 +52,6 @@ function icsDate(v: string): string | undefined {
   return z ? `${y}-${mo}-${d}T${h}:${mi}:${s}Z` : new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}`).toISOString();
 }
 
-function guessKind(title: string): AssignmentKind {
-  if (/\b(exam|midterm|final|test)\b/i.test(title)) return "exam";
-  if (/\bquiz/i.test(title)) return "quiz";
-  if (/\bproject\b/i.test(title)) return "project";
-  if (/\b(paper|essay)\b/i.test(title)) return "paper";
-  if (/\blab\b/i.test(title)) return "lab";
-  if (/\bdiscussion\b/i.test(title)) return "discussion";
-  return "homework";
-}
-
 export function eventsToAssignments(events: IcsEvent[], ctx: Pick<ConnectorContext, "knownCourses" | "now">): Assignment[] {
   const fetchedAt = ctx.now.toISOString();
   return events.map((e) => {
@@ -94,10 +86,15 @@ export const blackboardIcal: Connector = {
     return (await icalUrl(ctx)) ? { state: "ready" } : { state: "not-configured", detail: "Paste your calendar link in Settings" };
   },
   async sync(ctx): Promise<SyncResult> {
-    const url = await icalUrl(ctx);
-    if (!url) return {};
-    const res = await fetch(url);
+    const raw = await icalUrl(ctx);
+    if (!raw) return {};
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && !isLoopback(url.hostname)) throw new Error("The calendar link must be https");
+    const res = await ctx.fetch(url, { redirect: "follow", signal: AbortSignal.timeout(20_000) });
     if (!res.ok) throw new Error(`Calendar feed returned ${res.status}`);
-    return { assignments: eventsToAssignments(parseIcs(await res.text()), ctx) };
+    const text = new TextDecoder().decode(await readCapped(res, 10 * 1024 * 1024));
+    if (!/BEGIN:VCALENDAR/i.test(text)) throw new Error("That link did not return a calendar. Copy it again from Blackboard.");
+    const assignments = eventsToAssignments(parseIcs(text), ctx);
+    return { assignments, authoritative: { assignments: ["bb-ical:"] }, notes: [`${assignments.length} calendar items`] };
   },
 };

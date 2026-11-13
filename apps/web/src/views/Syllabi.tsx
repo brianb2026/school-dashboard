@@ -100,10 +100,12 @@ export function Syllabi({ onChanged }: { onChanged: () => void }) {
                 ) : (
                   <span className="tag warn">needs review</span>
                 )}
+                {c && !s.confirmed && <span className="tag warn">needs review</span>}
               </span>
               <span className="faint num" style={{ fontSize: 12 }}>{new Date(s.uploadedAt).toLocaleDateString()}</span>
               <span className="chip">
-                <button type="button" className="btn" onClick={() => void openRecord(s.id)}>{s.confirmed ? "Edit" : "Review"}</button>
+                {s.auto && s.confirmed && <span className="tag ok" title="Pulled from Blackboard and applied because its weights added up to 100%">auto</span>}
+                <button type="button" className={`btn ${s.confirmed ? "" : "primary"}`} onClick={() => void openRecord(s.id)}>{s.confirmed ? "Edit" : "Review"}</button>
                 <button
                   type="button"
                   className="btn ghost"
@@ -185,6 +187,7 @@ function Review({ rec, courses, onClose, onSaved }: { rec: SyllabusRecord; cours
       instructorEmails: emails.split(/[,\s]+/).filter(Boolean),
       officeHours,
       latePolicy,
+      letterScale: ap?.letterScale ?? p.letterScale,
     };
     try {
       const r = await api<{ courseId: string; items: number; categories: number }>(`/api/syllabus/${rec.id}/confirm`, { method: "POST", json: body });
@@ -203,7 +206,13 @@ function Review({ rec, courses, onClose, onSaved }: { rec: SyllabusRecord; cours
       <div className="review-head">
         <button type="button" className="btn ghost" onClick={onClose}>← All syllabi</button>
         <h1>{rec.filename}</h1>
-        <span className="faint">Check what was found. Nothing is applied until you save.</span>
+        <span className="faint">
+          {rec.confirmed
+            ? rec.auto
+              ? "Read and applied automatically (the weights added up to 100%). Change anything and save."
+              : "Saved. Change anything and save again."
+            : "Check what was found. Nothing is applied until you save."}
+        </span>
       </div>
 
       {p.needsHelp && (

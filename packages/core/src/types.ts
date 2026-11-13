@@ -24,6 +24,14 @@ export interface SourceRef {
 
 export type CourseLevel = "regular" | "honors" | "ap" | "ib" | "de";
 
+/** Which number to show as the class grade. "auto" picks the most trustworthy one available. */
+export type GradeSourcePref = "auto" | "blackboard" | "syllabus" | "points";
+
+export interface LetterCutoff {
+  letter: string;
+  min: number;
+}
+
 export interface Course {
   id: string;
   code: string; // "CHEM 101"
@@ -36,6 +44,16 @@ export interface Course {
   meetings: Meeting[];
   /** From the syllabus. */
   policies?: { officeHours?: string; latePolicy?: string };
+  /** This course's own letter scale (Blackboard grading schema or syllabus). Falls back to the school config. */
+  letterCutoffs?: LetterCutoff[];
+  letterCutoffsFrom?: "blackboard" | "syllabus" | "manual";
+  gradeSource?: GradeSourcePref;
+  /** Hidden courses stay in the database (so a re-sync doesn't bring them back) but show nowhere. */
+  hidden?: boolean;
+  /** Fields you changed by hand; a sync never overwrites them. */
+  edited?: string[];
+  /** Course page in the source system. */
+  url?: string;
   sources: SourceRef[];
 }
 
@@ -75,13 +93,17 @@ export interface Assignment {
   courseHint?: string;
   title: string;
   kind: AssignmentKind;
-  /** Grading category name; must match a GradingCategory.name for the course. */
+  /** Category as the source names it (Blackboard gradebook category, syllabus category). */
   category?: string;
   dueAt?: string; // ISO
   pointsPossible?: number;
   status: AssignmentStatus;
   /** Can this be submitted from the dashboard? Only true when the source allows it. */
   submittable: boolean;
+  /** False for columns the instructor excluded from the grade. */
+  countsTowardGrade?: boolean;
+  /** Where to open it in the source system. */
+  url?: string;
   attachments: FileRef[];
   /** Your own estimate in hours; used by the workload heatmap. */
   effortHours?: number;
@@ -102,6 +124,7 @@ export interface GradeEntry {
   score?: number; // undefined = not graded yet
   pointsPossible: number;
   dropped?: boolean;
+  gradedAt?: string;
   source: SourceRef;
 }
 
@@ -118,6 +141,16 @@ export interface GradingScheme {
   source: SourceRef;
 }
 
+/** A course total as the source system itself reports it (Blackboard "Weighted Total", "Total", …). */
+export interface CourseOverall {
+  courseId: string;
+  kind: "weighted-total" | "overall" | "total";
+  label: string;
+  percent?: number;
+  letter?: string;
+  source: SourceRef;
+}
+
 export type AttendanceStatus = "present" | "absent" | "late" | "excused";
 
 export interface AttendanceRecord {
@@ -127,10 +160,38 @@ export interface AttendanceRecord {
   source: SourceRef;
 }
 
+/** Attendance when the source only gives totals (e.g. the Qwickly gradebook column). */
+export interface AttendanceSummary {
+  courseId: string;
+  percent?: number;
+  present?: number;
+  late?: number;
+  absent?: number;
+  excused?: number;
+  total?: number;
+  label: string;
+  source: SourceRef;
+}
+
+export interface CourseFile {
+  id: string;
+  courseId: string;
+  name: string;
+  /** Folder trail inside the course, e.g. ["Course Content", "Week 1"]. */
+  folder: string[];
+  mimeType?: string;
+  /** Download address: a path on the source host, never an arbitrary URL. */
+  url: string;
+  isSyllabus: boolean;
+  modified?: string;
+  source: SourceRef;
+}
+
 export interface Announcement {
   id: string;
   courseId?: string;
   title: string;
+  /** Plain text. HTML from the source is stripped before it is stored. */
   body: string;
   postedAt: string;
   author?: string;

@@ -6,4 +6,5 @@ export * from "./ics.js";
 export * from "./match.js";
 export * from "./time.js";
 export * from "./merge.js";
+export * from "./html.js";
 export * from "./api.js";

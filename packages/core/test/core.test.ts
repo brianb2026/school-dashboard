@@ -195,6 +195,84 @@ describe("dedupeAssignments", () => {
       ],
       "America/New_York",
     );
-    expect(out.map((a) => a.id)).toEqual(["b1", "s2"]);
+    expect(out.map((a) => a.id)).toEqual(["s2", "b1"]);
+  });
+});
+
+import { gradeTrend, htmlToText, matchCategory, mergeAssignments, resolveCourseGrade } from "../src/index.js";
+
+describe("mergeAssignments", () => {
+  const mk = (id: string, source: Assignment["sources"][number]["source"], title: string, dueAt?: string, extra: Partial<Assignment> = {}): Assignment => ({
+    id, courseId: "c", title, kind: "homework", dueAt, status: "upcoming", submittable: false, attachments: [],
+    sources: [{ source, fetchedAt: "x" }], ...extra,
+  });
+  it("merges the same item across sources, best source wins, grade can follow", () => {
+    const r = mergeAssignments(
+      [
+        mk("gs1", "gradescope", "Homework 3", "2027-02-10T04:59:00Z", { status: "submitted" }),
+        mk("bb1", "blackboard-session", "Homework 3", undefined, { pointsPossible: 20 }),
+        mk("ic1", "blackboard-ical", "Homework 3 - CSC 172", "2027-02-10T04:59:00Z"),
+        mk("bb2", "blackboard-session", "Homework 4", "2027-02-17T04:59:00Z"),
+        mk("me1", "manual", "Homework 3", "2027-02-10T04:59:00Z"),
+      ],
+      "America/New_York",
+    );
+    expect(r.assignments.map((a) => a.id).sort()).toEqual(["bb1", "bb2", "me1"]);
+    expect(r.primaryOf.get("gs1")).toBe("bb1");
+    expect(r.primaryOf.get("ic1")).toBe("bb1");
+    const hw3 = r.assignments.find((a) => a.id === "bb1")!;
+    expect(hw3.dueAt).toBe("2027-02-10T04:59:00Z");
+    expect(hw3.status).toBe("submitted");
+    expect(hw3.sources).toHaveLength(3);
+  });
+  it("never merges two rows from one source, or different numbers", () => {
+    const r = mergeAssignments(
+      [mk("a", "blackboard-session", "Quiz 1", "2027-02-10T04:59:00Z"), mk("b", "blackboard-session", "Quiz 1 retake", "2027-02-10T04:59:00Z"), mk("c", "gradescope", "Quiz 10")],
+      "America/New_York",
+    );
+    expect(r.assignments).toHaveLength(3);
+  });
+});
+
+describe("resolveCourseGrade", () => {
+  const a = (id: string, title: string, kind: Assignment["kind"], pts: number, extra: Partial<Assignment> = {}): Assignment => ({
+    id, courseId: "c", title, kind, pointsPossible: pts, status: "graded", submittable: false, attachments: [], sources: [src], ...extra,
+  });
+  const g = (assignmentId: string, score: number, pointsPossible: number, gradedAt?: string): GradeEntry => ({ assignmentId, courseId: "c", score, pointsPossible, gradedAt, source: src });
+  const assignments = [a("h1", "Homework 1", "homework", 10), a("e1", "Midterm 1", "exam", 100), a("x", "Survey", "other", 5, { countsTowardGrade: false }), a("p", "Participation", "discussion", 10)];
+  const grades = [g("h1", 10, 10, "2027-02-01T00:00:00Z"), g("e1", 70, 100, "2027-03-01T00:00:00Z"), g("x", 0, 5), g("p", 9, 10, "2027-03-05T00:00:00Z")];
+  const scheme = { categories: [{ name: "Homework", weight: 40 }, { name: "Exams", weight: 60 }] };
+  const cutoffs = [{ letter: "A", min: 90 }, { letter: "B", min: 80 }, { letter: "C", min: 70 }, { letter: "F", min: 0 }];
+  const categoryOf = (x: Assignment) => matchCategory(x, scheme.categories);
+
+  it("uses syllabus weights, counts what fits no category, skips excluded columns", () => {
+    const r = resolveCourseGrade({ scheme, assignments, grades, cutoffs, categoryOf });
+    expect(r.basis).toBe("syllabus");
+    expect(r.percent).toBeCloseTo(100 * 0.4 + 70 * 0.6);
+    expect(r.letter).toBe("B");
+    expect(r.uncategorized).toBe(1); // Participation
+    expect(r.options.map((o) => o.basis)).toEqual(["syllabus", "points"]);
+    expect(r.options[1]!.percent).toBeCloseTo((89 / 120) * 100);
+  });
+  it("prefers Blackboard's weighted total, but only a plain Total after the syllabus", () => {
+    const overall = [{ courseId: "c", kind: "total" as const, label: "Total", percent: 74, source: src }];
+    expect(resolveCourseGrade({ scheme, assignments, grades, cutoffs, categoryOf, overall }).basis).toBe("syllabus");
+    const weighted = [...overall, { courseId: "c", kind: "weighted-total" as const, label: "Weighted Total", percent: 81.5, letter: "B-", source: src }];
+    const r = resolveCourseGrade({ scheme, assignments, grades, cutoffs, categoryOf, overall: weighted });
+    expect(r).toMatchObject({ basis: "blackboard", percent: 81.5, letter: "B-" });
+    expect(resolveCourseGrade({ scheme, assignments, grades, cutoffs, categoryOf, overall: weighted, prefer: "points" }).basis).toBe("points");
+  });
+  it("has no grade without graded work, and a trend once there is", () => {
+    expect(resolveCourseGrade({ assignments, grades: [], cutoffs, categoryOf }).basis).toBe("none");
+    const t = gradeTrend({ scheme, assignments, grades, cutoffs, categoryOf });
+    expect(t.map((p) => Math.round(p.percent))).toEqual([100, 82, 82]);
+  });
+});
+
+describe("htmlToText", () => {
+  it("drops script, keeps text and links, decodes entities", () => {
+    const t = htmlToText('<p>Exam&nbsp;2 is <b>Friday</b> &amp; covers ch.&#160;5&ndash;7.</p><script>alert(1)</script><ul><li>Bring ID</li><li><a href="https://x.edu/r?a=1&amp;b=2">Review sheet</a></li></ul><a href="javascript:alert(1)">bad</a>');
+    expect(t).toBe("Exam 2 is Friday & covers ch. 5–7.\n\n• Bring ID\n• Review sheet (https://x.edu/r?a=1&b=2)\nbad");
+    expect(t).not.toMatch(/script|javascript/);
   });
 });
