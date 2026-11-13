@@ -1,6 +1,6 @@
 {
   "name": "school-dashboard",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "A local-only personal student dashboard: Blackboard, Gradescope, Qwickly, Gmail and syllabi in one place.",
   "type": "module",
@@ -17,11 +17,14 @@
     "dev:web": "npm run dev --workspace @sd/web",
     "build": "npm run build --workspace @sd/web",
     "typecheck": "tsc -p .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "start": "npm run build && OPEN_BROWSER=1 npm run start --workspace @sd/server",
+    "demo": "npm run build && node --import tsx scripts/demo.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.12",
+    "tsx": "^4.19.0"
   }
 }

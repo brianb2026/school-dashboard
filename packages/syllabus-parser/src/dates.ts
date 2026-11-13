@@ -72,7 +72,8 @@ export function extractDates(text: string, termStart: string): ParsedDate[] {
     const title =
       line
         .replace(matchText, "")
-        .replace(/^(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s*/i, "")
+        .replace(/^\s*(week|wk)\.?\s*\d+\b[\s:\-–—|,]*/i, "")
+        .replace(/^\s*(mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s*/i, "")
         .replace(/^[\s:\-–—|,]+|[\s:\-–—|,]+$/g, "")
         .replace(/\s{2,}/g, " ") || kind;
     out.push({ date: `${year}-${pad(month)}-${pad(day)}`, title, kind, line });

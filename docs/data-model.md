@@ -17,6 +17,7 @@ Every record has `sources[]` (`SourceRef`: source, externalId, url, fetchedAt).
 
 ## Grade math
 
+- Class grade (`resolveCourseGrade`), first available: Blackboard weighted/overall total → syllabus weights → Blackboard plain total → points. All available options are returned; `course.gradeSource` pins one.
 - Category percent = Σ earned / Σ possible over graded, non-dropped items (after drop-lowest).
 - Current grade = Σ(category% × weight) / Σ(weights of categories with graded work).
 - What-if: needed on the rest = (target × 100 − current × weightGraded) / (100 − weightGraded).

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cd ../.. && node --env-file-if-exists=.env --import tsx --watch apps/server/src/index.ts",
+    "dev": "cd ../.. && SD_DEV=1 node --env-file-if-exists=.env --import tsx --watch apps/server/src/index.ts",
     "start": "cd ../.. && node --env-file-if-exists=.env --import tsx apps/server/src/index.ts"
   },
   "dependencies": {
