@@ -1,0 +1,147 @@
+/**
+ * Domain model shared by every connector, the server, and the web UI.
+ * Every record carries `source` so the UI can show where a fact came from
+ * and so a re-sync from one source never clobbers another.
+ */
+
+export type SourceId =
+  | "blackboard-ical"
+  | "blackboard-rest"
+  | "blackboard-session"
+  | "gradescope"
+  | "qwickly"
+  | "gmail"
+  | "syllabus"
+  | "manual";
+
+export interface SourceRef {
+  source: SourceId;
+  /** ID in the source system (Blackboard course ID, Gmail message ID, …). */
+  externalId?: string;
+  url?: string;
+  fetchedAt: string; // ISO timestamp
+}
+
+export type CourseLevel = "regular" | "honors" | "ap" | "ib" | "de";
+
+export interface Course {
+  id: string;
+  code: string; // "CHEM 101"
+  name: string;
+  term: string;
+  credits: number;
+  level: CourseLevel;
+  color: string; // one of the course palette tokens, e.g. "c3"
+  instructors: Person[];
+  meetings: Meeting[];
+  sources: SourceRef[];
+}
+
+export interface Person {
+  name: string;
+  email?: string;
+  role: "instructor" | "ta" | "student" | "staff";
+  officeHours?: string;
+}
+
+export interface Meeting {
+  /** 0 = Sunday … 6 = Saturday */
+  weekday: number;
+  start: string; // "09:30"
+  end: string; // "10:45"
+  location?: string;
+}
+
+export type AssignmentKind =
+  | "homework"
+  | "quiz"
+  | "exam"
+  | "project"
+  | "paper"
+  | "lab"
+  | "discussion"
+  | "reading"
+  | "other";
+
+export type AssignmentStatus = "upcoming" | "submitted" | "graded" | "late" | "missing" | "excused";
+
+export interface Assignment {
+  id: string;
+  courseId: string;
+  title: string;
+  kind: AssignmentKind;
+  /** Grading category name; must match a GradingCategory.name for the course. */
+  category?: string;
+  dueAt?: string; // ISO
+  pointsPossible?: number;
+  status: AssignmentStatus;
+  /** Can this be submitted from the dashboard? Only true when the source allows it. */
+  submittable: boolean;
+  attachments: FileRef[];
+  /** Your own estimate in hours; used by the workload heatmap. */
+  effortHours?: number;
+  sources: SourceRef[];
+}
+
+export interface FileRef {
+  name: string;
+  url?: string;
+  /** Path inside DATA_DIR once cached for offline use. */
+  localPath?: string;
+  mimeType?: string;
+}
+
+export interface GradeEntry {
+  assignmentId: string;
+  courseId: string;
+  score?: number; // undefined = not graded yet
+  pointsPossible: number;
+  dropped?: boolean;
+  source: SourceRef;
+}
+
+export interface GradingCategory {
+  name: string; // "Homework"
+  weight: number; // percent, e.g. 20
+  dropLowest?: number;
+}
+
+export interface GradingScheme {
+  courseId: string;
+  categories: GradingCategory[];
+  /** Where the weights came from, e.g. the parsed syllabus. */
+  source: SourceRef;
+}
+
+export type AttendanceStatus = "present" | "absent" | "late" | "excused";
+
+export interface AttendanceRecord {
+  courseId: string;
+  date: string; // YYYY-MM-DD
+  status: AttendanceStatus;
+  source: SourceRef;
+}
+
+export interface Announcement {
+  id: string;
+  courseId?: string;
+  title: string;
+  body: string;
+  postedAt: string;
+  author?: string;
+  read: boolean;
+  source: SourceRef;
+}
+
+export interface Message {
+  id: string;
+  threadId: string;
+  courseId?: string;
+  from: Person;
+  to: Person[];
+  subject: string;
+  snippet: string;
+  receivedAt: string;
+  unread: boolean;
+  source: SourceRef;
+}

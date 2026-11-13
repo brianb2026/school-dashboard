@@ -1,0 +1,18 @@
+{
+  "name": "@sd/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cd ../.. && node --env-file-if-exists=.env --import tsx --watch apps/server/src/index.ts",
+    "start": "cd ../.. && node --env-file-if-exists=.env --import tsx apps/server/src/index.ts"
+  },
+  "dependencies": {
+    "@sd/ai": "*",
+    "@sd/connectors": "*",
+    "@sd/core": "*",
+    "@sd/syllabus-parser": "*",
+    "fastify": "^5.2.0",
+    "tsx": "^4.19.0"
+  }
+}

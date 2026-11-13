@@ -1,0 +1,72 @@
+/*
+ * Design tokens. Rules (see docs/design.md):
+ *  - flat surfaces, 1px hairline borders, no gradients, no glows, no neon
+ *  - one calm accent; per-course colors are muted and only used as small marks
+ *  - numbers, dates and times in Plex Mono with tabular figures
+ * Fonts are bundled locally (@fontsource), so the page makes no font requests.
+ */
+:root {
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --radius: 6px;
+  --gap: 12px;
+
+  /* Dark (default) */
+  --bg: #15181d;
+  --surface: #1c2027;
+  --surface-2: #232831;
+  --border: #2c323c;
+  --text: #e4e6ea;
+  --text-muted: #949ca8;
+  --text-faint: #6b7380;
+  --accent: #7fa7c9;
+
+  --ok: #8fb08a;
+  --warn: #d1a85a;
+  --danger: #d27a6c;
+
+  /* Course palette: muted, distinguishable, colorblind-checked pairs */
+  --c1: #c9806a; /* clay */
+  --c2: #d1a85a; /* ochre */
+  --c3: #8fb08a; /* sage */
+  --c4: #6fa4a8; /* teal */
+  --c5: #7f95c4; /* slate blue */
+  --c6: #a88cb5; /* heather */
+  --c7: #c48a9c; /* rose */
+
+  /* Workload heat steps (single hue, discrete) */
+  --heat-0: #1f242c;
+  --heat-1: #2a3a45;
+  --heat-2: #35546a;
+  --heat-3: #4a7394;
+  --heat-4: #7fa7c9;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f5f4f1;
+    --surface: #ffffff;
+    --surface-2: #f0efeb;
+    --border: #dddbd5;
+    --text: #1f2328;
+    --text-muted: #5d6470;
+    --text-faint: #8a909a;
+    --accent: #3d6d96;
+    --ok: #4f7a4a;
+    --warn: #9a6f1c;
+    --danger: #a84a3c;
+    --c1: #b0624b;
+    --c2: #a87d22;
+    --c3: #5f8a59;
+    --c4: #3f7f84;
+    --c5: #50689e;
+    --c6: #7f5f8f;
+    --c7: #a05a70;
+    --heat-0: #eeede9;
+    --heat-1: #d6e1ea;
+    --heat-2: #aec5d8;
+    --heat-3: #7ea3c2;
+    --heat-4: #3d6d96;
+  }
+}

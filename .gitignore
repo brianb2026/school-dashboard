@@ -1,0 +1,18 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Secrets: never commit these
+.env
+.env.*
+!.env.example
+
+# Your school data stays on your machine
+data/*
+!data/.gitkeep
+config/school.json
+uploads/
+*.sqlite
+*.sqlite-*
+*.db
