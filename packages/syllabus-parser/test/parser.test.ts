@@ -49,10 +49,32 @@ describe("parseSyllabusText", () => {
     expect(got).toContainEqual(["2027-04-29", "project"]);
   });
 
+  it("reads the course code and title from the header", () => {
+    expect(r.course).toEqual({ code: "CHEM 101", title: "General Chemistry I" });
+  });
+
   it("finds contact info and the late policy", () => {
     expect(r.policies.instructorEmails).toEqual(["ada.lin@example.edu"]);
-    expect(r.policies.officeHours).toMatch(/Tue\/Thu/);
+    expect(r.policies.officeHours).toBe("Tue/Thu 2:00–3:30 pm, Science 214");
     expect(r.policies.latePolicy).toMatch(/no work accepted/);
     expect(r.needsHelp).toBe(false);
+  });
+});
+
+import { extractPolicies } from "../src/index.js";
+
+describe("extractPolicies", () => {
+  it("keeps the late policy to its own paragraph, even with no blank lines (PDF text)", () => {
+    const p = extractPolicies(
+      [
+        "Office hours: Tue/Thu 2:00-3:30 pm, Science 214",
+        "Late policy: work loses 10% per day and is",
+        "not accepted after solutions post.",
+        "Schedule",
+        "Week 3  Feb 4  Quiz 1",
+      ].join("\n"),
+    );
+    expect(p.officeHours).toBe("Tue/Thu 2:00-3:30 pm, Science 214");
+    expect(p.latePolicy).toBe("Late policy: work loses 10% per day and is not accepted after solutions post.");
   });
 });

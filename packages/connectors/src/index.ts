@@ -8,7 +8,7 @@ import { qwickly } from "./qwickly/index.js";
 import type { Connector } from "./types.js";
 
 export * from "./types.js";
-export { parseIcs, eventsToAssignments } from "./blackboard/ical.js";
+export { parseIcs, eventsToAssignments, ICAL_SECRET } from "./blackboard/ical.js";
 export { teacherQuery, GMAIL_SCOPES } from "./gmail/index.js";
 export { ATTENDANCE_COLUMN } from "./qwickly/index.js";
 

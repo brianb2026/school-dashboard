@@ -35,8 +35,9 @@
 The same assignment can come from the calendar feed, the REST API and a syllabus. Rules:
 
 1. Record IDs are `<source>:<externalId>`; each source upserts its own rows.
-2. A merge step (v0.2) links duplicates by course + normalized title + due date within 24 h, and picks fields by source priority: REST > session > Gradescope > calendar feed > syllabus > manual. Your manual edits always win.
-3. Every record keeps `sources[]`, so the UI can show "from Blackboard · syllabus" and link back.
+2. Today (v0.2): a syllabus item is hidden when a live source (calendar feed, later the API) has an item for the same course on the same local day with the same kind or a mostly-matching title (`dedupeAssignments`). Planned: full field-level merging by source priority REST > session > Gradescope > calendar feed > syllabus > manual, with your manual edits always winning.
+3. Course matching (`matchCourse`): your saved fix-ups first, then the course code in any spelling, then a unique full course name. Unsure → "Unmatched", never a guess.
+4. Every record keeps `sources[]`, so the UI can show "from Blackboard · syllabus" and link back.
 
 ## Sync etiquette
 

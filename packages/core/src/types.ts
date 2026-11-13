@@ -34,6 +34,8 @@ export interface Course {
   color: string; // one of the course palette tokens, e.g. "c3"
   instructors: Person[];
   meetings: Meeting[];
+  /** From the syllabus. */
+  policies?: { officeHours?: string; latePolicy?: string };
   sources: SourceRef[];
 }
 
@@ -67,7 +69,10 @@ export type AssignmentStatus = "upcoming" | "submitted" | "graded" | "late" | "m
 
 export interface Assignment {
   id: string;
+  /** "unassigned" until matched; see matchCourse and the Unmatched list in Settings. */
   courseId: string;
+  /** Raw text the course was (or will be) matched from, e.g. the calendar title. */
+  courseHint?: string;
   title: string;
   kind: AssignmentKind;
   /** Grading category name; must match a GradingCategory.name for the course. */

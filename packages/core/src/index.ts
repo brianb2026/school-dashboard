@@ -3,3 +3,7 @@ export * from "./grades.js";
 export * from "./gpa.js";
 export * from "./workload.js";
 export * from "./ics.js";
+export * from "./match.js";
+export * from "./time.js";
+export * from "./merge.js";
+export * from "./api.js";

@@ -19,7 +19,8 @@ export const qwickly: Connector = {
   label: "Qwickly attendance",
   capabilities: ["attendance"],
   async status() {
-    return { state: "ready", detail: "Reads the attendance column from Blackboard grades, or your own check-in log" };
+    // Becomes "ready" once the Blackboard grade connector (v0.3) provides the attendance column.
+    return { state: "not-configured", detail: "Arrives with Blackboard grades (v0.3)" };
   },
   async sync() {
     throw new NotImplementedYet("Qwickly attendance mapping");

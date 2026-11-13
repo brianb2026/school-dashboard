@@ -1,9 +1,9 @@
 # Privacy and security
 
-- **Local only.** Server and UI bind to 127.0.0.1. Don't change `HOST` to `0.0.0.0`.
+- **Local only.** Server and UI bind to 127.0.0.1. Don't change `HOST` to `0.0.0.0`. The API also refuses requests sent from other websites (any `Origin` that isn't localhost) and any `Host` other than 127.0.0.1/localhost, so a page you visit can't read your data through it, even with DNS tricks.
 - **No passwords.** Sign-in always happens on the real Blackboard / Google / school SSO page, in a real browser window. The app keeps only the resulting token or session cookie.
 - **Secrets in the Keychain.** Service name `school-dashboard`. View or delete them in Keychain Access.
 - **What's in git:** code, docs, `.env.example`, `config/school.example.json`. **Not in git:** `.env`, `config/school.json`, `data/` (database, cached files, uploads).
 - **AI is opt-in.** `AI_PROVIDER=none` by default. When enabled it runs only when you click (summarize this, help parse this), and only that text is sent. Local models via Ollama keep it on your machine.
 - **Wipe:** stop the server, delete `data/`, and remove `school-dashboard` items from the Keychain.
-- **Calendar link:** your Blackboard iCal URL is a bearer link. Keep it in `.env`, never in a commit or screenshot.
+- **Calendar link:** your Blackboard iCal URL is a bearer link. Paste it in Settings and it goes to the Keychain; the UI only ever shows its host afterwards. Never put it in a commit or screenshot.

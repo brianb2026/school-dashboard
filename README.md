@@ -4,7 +4,7 @@ A personal, local-only "command center" for school. One screen for what's due, y
 
 It runs on your own Mac. Your school data stays in a SQLite file on your machine, sign-in tokens go in the macOS Keychain, and the app never sees or stores your passwords.
 
-> Status: **project skeleton**. The grade/GPA math, workload and conflict detection, calendar export, rule-based syllabus parsing and the Blackboard calendar-feed reader work and have tests. The UI shell renders with sample data. Everything else is stubbed with notes on how it will work. See the [roadmap](#roadmap).
+> Status: **v0.2, real data in**. You can paste your Blackboard calendar link, add courses, place calendar items that didn't match a course, and upload a syllabus to review and save its grading weights and due dates. The Today view shows your real data once any of that exists (sample data until then). Gmail, grades from Blackboard, and the other connectors are still stubs with notes on how they'll work. See the [roadmap](#roadmap).
 
 ## What it shows
 
@@ -69,9 +69,16 @@ npm install
 cp .env.example .env                        # fill in what you have; leave the rest blank
 cp config/school.example.json config/school.json
 npm run dev                                 # server on :5179, UI on http://127.0.0.1:5173
-npm test                                    # unit tests
+npm test                                    # unit + API tests
 npm run typecheck
 ```
+
+### First run
+
+1. **Settings → Blackboard calendar link**: paste the link from Blackboard (Calendar → settings → Share calendar), then **Sync now**.
+2. **Settings → Courses**: add your classes (code, name, credits, level, color). Calendar items move into them automatically.
+3. **Settings → Unmatched items**: anything left over, pick its course once and it's remembered.
+4. **Syllabi**: drop in each syllabus, check the weights and dates, save. Class grades and GPA use those weights once grades arrive.
 
 ## Roadmap
 
@@ -84,10 +91,11 @@ npm run typecheck
 - [x] UI shell and design tokens, Today view with sample data
 
 **v0.2, real data in**
-- [ ] Settings screen: connector status, paste the calendar link, opt-in toggles with plain warnings
-- [ ] Syllabus upload + review screen (edit weights/dates, attach to a course, confirm)
-- [ ] Wire `/api/dashboard` into the UI; drop sample data once a source is connected
-- [ ] Course matching: calendar items → courses (code/name match + manual fix-ups)
+- [x] Settings: calendar link (kept in the Keychain, never shown back), courses, connector status + Sync now, opt-in readers behind a warning
+- [x] Syllabus upload + review (edit weights, dates, times, course; confirm; re-edit; delete undoes it)
+- [x] `/api/dashboard` wired into the Today view; sample data only until you have a course or an assignment
+- [x] Course matching: code in any spelling (`CHEM-101-002`, `chem101`), unique course name, then your saved fix-ups ("Unmatched items")
+- [x] Syllabus items hide when Blackboard has the same item that day; items map to grading categories
 
 **v0.3, grades and inbox**
 - [ ] Gmail OAuth (loopback), teacher-mail filter, read + send, reply templates

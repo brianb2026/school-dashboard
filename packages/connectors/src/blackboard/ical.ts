@@ -1,4 +1,4 @@
-import type { Assignment, AssignmentKind } from "@sd/core";
+import { matchCourse, type Assignment, type AssignmentKind } from "@sd/core";
 import type { Connector, ConnectorContext, SyncResult } from "../types.js";
 
 /**
@@ -63,12 +63,11 @@ function guessKind(title: string): AssignmentKind {
 export function eventsToAssignments(events: IcsEvent[], ctx: Pick<ConnectorContext, "knownCourses" | "now">): Assignment[] {
   const fetchedAt = ctx.now.toISOString();
   return events.map((e) => {
-    const course = ctx.knownCourses.find(
-      (c) => e.summary.includes(c.code) || (e.description ?? "").includes(c.code) || e.summary.includes(c.name),
-    );
+    const courseHint = [e.summary, e.description].filter(Boolean).join(" \n ");
     return {
       id: `bb-ical:${e.uid}`,
-      courseId: course?.id ?? "unassigned",
+      courseId: matchCourse(courseHint, ctx.knownCourses) ?? "unassigned",
+      courseHint,
       title: e.summary,
       kind: guessKind(e.summary),
       dueAt: e.start,
@@ -80,15 +79,22 @@ export function eventsToAssignments(events: IcsEvent[], ctx: Pick<ConnectorConte
   });
 }
 
+/** Keychain key for the calendar link. It's a bearer link, so it's treated like a secret. */
+export const ICAL_SECRET = "blackboard.ical_url";
+
+async function icalUrl(ctx: ConnectorContext): Promise<string | undefined> {
+  return (await ctx.secrets.get(ICAL_SECRET)) || ctx.env.BLACKBOARD_ICAL_URL || undefined;
+}
+
 export const blackboardIcal: Connector = {
   id: "blackboard-ical",
   label: "Blackboard calendar feed",
   capabilities: ["assignments"],
   async status(ctx) {
-    return ctx.env.BLACKBOARD_ICAL_URL ? { state: "ready" } : { state: "not-configured", detail: "Set BLACKBOARD_ICAL_URL" };
+    return (await icalUrl(ctx)) ? { state: "ready" } : { state: "not-configured", detail: "Paste your calendar link in Settings" };
   },
   async sync(ctx): Promise<SyncResult> {
-    const url = ctx.env.BLACKBOARD_ICAL_URL;
+    const url = await icalUrl(ctx);
     if (!url) return {};
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Calendar feed returned ${res.status}`);

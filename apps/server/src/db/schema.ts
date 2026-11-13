@@ -3,6 +3,8 @@
  * Each table keeps the typed columns the UI filters/sorts on, plus `data`
  * holding the full record as JSON so the model can grow without migrations.
  * Primary keys are "<source>:<externalId>" so re-syncs upsert instead of duplicating.
+ *
+ * Append only: each entry runs once, tracked with PRAGMA user_version.
  */
 export const MIGRATIONS: string[] = [
   `
@@ -68,5 +70,18 @@ export const MIGRATIONS: string[] = [
     ok INTEGER NOT NULL,
     detail TEXT
   );
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,     -- non-secret settings only; secrets go to the Keychain
+    value TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS course_aliases (
+    pattern TEXT PRIMARY KEY COLLATE NOCASE,
+    course_id TEXT NOT NULL
+  );
+  `,
+  `
+  ALTER TABLE syllabi ADD COLUMN applied TEXT;  -- the reviewed ConfirmSyllabus you saved
   `,
 ];
