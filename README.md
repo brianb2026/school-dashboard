@@ -73,6 +73,8 @@ npm test                                    # unit + API tests
 npm run typecheck
 ```
 
+CI (GitHub Actions, `.github/workflows/ci.yml`) runs the typecheck, tests and UI build on Node 22 and 24 for every pull request and push to `main`.
+
 ### First run
 
 1. **Settings → Blackboard calendar link**: paste the link from Blackboard (Calendar → settings → Share calendar), then **Sync now**.
