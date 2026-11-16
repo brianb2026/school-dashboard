@@ -119,4 +119,52 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE syllabi ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
   ALTER TABLE sync_log ADD COLUMN notes TEXT;
   `,
+  `
+  -- Attendance tracking was removed.
+  DROP TABLE IF EXISTS attendance;
+  DROP TABLE IF EXISTS attendance_summary;
+  `,
+  `
+  -- Announcements you dismissed stay dismissed across re-syncs.
+  ALTER TABLE announcements ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Each course's content as Blackboard lays it out (folders, pages, files, tools), replaced on every sync.
+  CREATE TABLE IF NOT EXISTS course_contents (
+    course_id TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    data TEXT NOT NULL
+  );
+  `,
+  `
+  -- The official record from the student information system (one row, replaced on each read).
+  CREATE TABLE IF NOT EXISTS sis_record (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    fetched_at TEXT NOT NULL,
+    data TEXT NOT NULL
+  );
+  `,
+  `
+  -- What changed since you last looked: new grades, moved deadlines, new work, files, announcements.
+  CREATE TABLE IF NOT EXISTS changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    course_id TEXT,
+    ref TEXT,
+    data TEXT NOT NULL,
+    seen INTEGER NOT NULL DEFAULT 0,
+    notified INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS changes_at ON changes (at);
+  -- Text inside course files, for searching them (filled in quietly, a few files at a time).
+  CREATE TABLE IF NOT EXISTS file_text (
+    file_id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    pages INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL
+  );
+  CREATE VIRTUAL TABLE IF NOT EXISTS file_search USING fts5(file_id UNINDEXED, page UNINDEXED, name, body, tokenize = 'unicode61 remove_diacritics 2');
+  `,
 ];

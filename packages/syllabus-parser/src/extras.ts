@@ -37,9 +37,13 @@ export function extractLetterScale(text: string): LetterCutoff[] | undefined {
     if (m) put(m[1]!, Number(m[2]));
     m = new RegExp(String.raw`^(?:≥|>=|at least)?\s*${NUM}\s*%?\s*(?:\+|and (?:above|up|higher)|or (?:above|higher|more))?\s*[:=]\s*${LET}$`, "i").exec(line);
     if (m) put(m[2]!, Number(m[1]));
+    // "> 90% will guarantee at least an A-"
+    m = new RegExp(String.raw`^(?:>|≥|>=|above|over)\s*${NUM}\s*%?.{0,40}?\b(?:an?\s+)${LET}\.?$`, "i").exec(line);
+    if (m) put(m[2]!, Number(m[1]));
   }
   const scale = ORDER.filter((l) => found.has(l)).map((letter) => ({ letter, min: found.get(letter)! }));
-  if (scale.length < 4 || !found.has("A")) return undefined;
+  // A real scale has several letters, starting somewhere in the A range.
+  if (scale.length < 4 || !scale[0]!.letter.startsWith("A")) return undefined;
   for (let i = 1; i < scale.length; i++) if (scale[i]!.min >= scale[i - 1]!.min) return undefined;
   if (!found.has("F")) scale.push({ letter: "F", min: 0 });
   else scale[scale.length - 1] = { letter: "F", min: 0 };

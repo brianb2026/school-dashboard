@@ -3,6 +3,7 @@ import type { Course } from "@sd/core";
 import {
   AuthExpiredError,
   CookieJar,
+  GMAIL_CLIENT_SECRET,
   GMAIL_TOKEN,
   GRADESCOPE_COOKIES,
   REST_TOKENS,
@@ -12,6 +13,7 @@ import {
   gmail,
   gmailAuthUrl,
   gradescope,
+  gradescopeCourseCount,
   parseAddress,
   parseGsAssignments,
   parseGsCourses,
@@ -41,8 +43,9 @@ const GS_ACCOUNT = `
 <h1>Your Courses</h1>
 <div class="courseList"><div class="courseList--term">Spring 2027</div>
 <div class="courseList--coursesForTerm">
-  <a class="courseBox" href="/courses/9001"><h3 class="courseBox--shortname">CSC 172</h3><div class="courseBox--name">Data Structures &amp; Algorithms</div><div class="courseBox--assignments">3 assignments</div></a>
+  <a class="courseBox " data-loginrequired="false" href="/courses/9001"><h3 class="courseBox--shortname">CSC 172</h3><div class="courseBox--name">Data Structures &amp; Algorithms</div><div class="courseBox--assignments">3 assignments</div></a>
   <a class="courseBox" href="/courses/9002"><h3 class="courseBox--shortname">ART 110</h3><div class="courseBox--name">Drawing</div></a>
+  <button class="courseBox courseBox-new js-enrollInCourse">Add a course</button>
 </div>
 <div class="courseList--term">Fall 2026</div>
 <div class="courseList--coursesForTerm"><a class="courseBox" href="/courses/8000"><h3 class="courseBox--shortname">MTH 161</h3><div class="courseBox--name">Calculus</div></a></div></div>`;
@@ -94,8 +97,20 @@ describe("Gradescope", () => {
       ["gs:9001:503", "bb:_172_1", "upcoming"],
     ]);
     expect(r.grades).toEqual([expect.objectContaining({ assignmentId: "gs:9001:501", score: 45, pointsPossible: 50 })]);
+    // Each item carries its Gradescope number, which is how it lines up with the Blackboard column that links to it.
+    expect(r.assignments!.map((a) => a.externalRefs)).toEqual([["gradescope:501"], ["gradescope:502"], ["gradescope:503"]]);
     expect(r.notes!.join(" ")).toMatch(/1 Gradescope course matched none/);
     expect(seen).toEqual(["www.gradescope.com/account _gradescope_session=s", "www.gradescope.com/courses/9001 _gradescope_session=s"]);
+
+    // A sign-in that lands in an account with no classes is told apart from "not signed in".
+    const jar = CookieJar.parse(c.secrets.data.get(GRADESCOPE_COOKIES));
+    expect(await gradescopeCourseCount(jar, f)).toBe(2);
+    const empty: FetchLike = async () => new Response('<div class="courseList"><button class="courseBox courseBox-new">Add a course</button></div>', { status: 200 });
+    expect(await gradescopeCourseCount(jar, empty)).toBe(0);
+    expect(await gradescopeCourseCount(new CookieJar([]), f)).toBe(-1);
+    const c0 = ctx(empty, { GRADESCOPE_REQUEST_GAP_MS: "0" });
+    c0.secrets.data.set(GRADESCOPE_COOKIES, jar.serialize());
+    expect((await gradescope.sync(c0)).notes!.join(" ")).toMatch(/has no classes/);
 
     const bounced: FetchLike = async () => new Response(null, { status: 302, headers: { location: "/login" } });
     const c2 = ctx(bounced);
@@ -161,6 +176,14 @@ describe("Gmail", () => {
     const sent = JSON.parse(calls.at(-1)!.body!) as { raw: string };
     expect(Buffer.from(sent.raw, "base64url").toString()).toMatch(/^To: ada\.lin@example\.edu\r\nSubject: /);
     expect(calls.at(-1)!.auth).toBe("Bearer at");
+
+    // Set up from Settings: the client secret sits in the encrypted vault, not in the environment.
+    const c3 = ctx(f, { GOOGLE_CLIENT_ID: "cid", GOOGLE_CLIENT_SECRET_SAVED: "true" });
+    expect((await gmail.status(c3)).state).toBe("needs-sign-in");
+    c3.secrets.data.set(GMAIL_CLIENT_SECRET, "vault-sec");
+    await gmailExchangeCode(c3, "code2", "ver2");
+    expect(calls.at(-1)!.body).toContain("client_secret=vault-sec");
+    expect((await gmail.status(ctx(f, { GOOGLE_CLIENT_ID: "cid" }))).state).toBe("not-configured");
 
     tokenOk = false;
     await expect(gmail.sync(c)).rejects.toBeInstanceOf(AuthExpiredError);

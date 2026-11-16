@@ -9,6 +9,8 @@ export type SourceId =
   | "blackboard-rest"
   | "blackboard-session"
   | "gradescope"
+  | "canvas"
+  | "sis"
   | "qwickly"
   | "gmail"
   | "syllabus"
@@ -104,6 +106,14 @@ export interface Assignment {
   countsTowardGrade?: boolean;
   /** Where to open it in the source system. */
   url?: string;
+  /**
+   * Ids that name the same item in another system, e.g. "gradescope:1234567"
+   * on both the Blackboard column and the Gradescope row. Two items sharing
+   * one are the same thing, whatever their titles say.
+   */
+  externalRefs?: string[];
+  /** The Blackboard content item this belongs to (its page may hold the handout). */
+  contentId?: string;
   attachments: FileRef[];
   /** Your own estimate in hours; used by the workload heatmap. */
   effortHours?: number;
@@ -151,28 +161,6 @@ export interface CourseOverall {
   source: SourceRef;
 }
 
-export type AttendanceStatus = "present" | "absent" | "late" | "excused";
-
-export interface AttendanceRecord {
-  courseId: string;
-  date: string; // YYYY-MM-DD
-  status: AttendanceStatus;
-  source: SourceRef;
-}
-
-/** Attendance when the source only gives totals (e.g. the Qwickly gradebook column). */
-export interface AttendanceSummary {
-  courseId: string;
-  percent?: number;
-  present?: number;
-  late?: number;
-  absent?: number;
-  excused?: number;
-  total?: number;
-  label: string;
-  source: SourceRef;
-}
-
 export interface CourseFile {
   id: string;
   courseId: string;
@@ -184,7 +172,50 @@ export interface CourseFile {
   url: string;
   isSyllabus: boolean;
   modified?: string;
+  /** The Blackboard content item it sits on. */
+  contentId?: string;
   source: SourceRef;
+}
+
+/**
+ * One entry of a course's content as Blackboard lays it out (folders,
+ * pages, files, links, assignments, tests, tools like Gradescope or Qwickly),
+ * in Blackboard's own order, so the dashboard can show the course page.
+ */
+export interface ContentItem {
+  /** Blackboard content id. */
+  id: string;
+  /** The folder it sits in; none = top level. */
+  parentId?: string;
+  title: string;
+  kind: "folder" | "page" | "file" | "link" | "assignment" | "test" | "tool" | "discussion" | "other";
+  /** Opens this item in Blackboard. */
+  url?: string;
+  /** A web link item's own address (http/https only). */
+  href?: string;
+  /** The start of a page's text, as plain text. */
+  text?: string;
+  /** For tools: "Gradescope", "Qwickly", … */
+  tool?: string;
+  /** Content ids whose files belong to this item (Ultra keeps a page's body in a hidden child). */
+  bodyIds?: string[];
+  modified?: string;
+}
+
+/**
+ * What the school's student information system (SIS) says about you: the
+ * official record, read from your own signed-in pages.
+ */
+export interface SisRecord {
+  /** Every course on your record, all terms, with the official grade once it's posted. */
+  history: { term: string; code: string; title: string; units?: number; grade?: string; status?: string }[];
+  /** Your classes as the SIS schedules them (days, times, rooms). */
+  schedule: { code: string; section?: string; component?: string; days: number[]; start?: string; end?: string; room?: string }[];
+  holds: { title: string }[];
+  todos: { title: string }[];
+  /** Enrollment appointments: "You may begin enrolling for Spring 2027 … on …". */
+  enrollment: { term?: string; at?: string; text: string }[];
+  fetchedAt: string;
 }
 
 export interface Announcement {

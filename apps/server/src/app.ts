@@ -1,14 +1,16 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
-import type { FetchLike, SecretStore } from "@sd/connectors";
+import { normalizeBaseUrl, presetLmsFor, SIS_COOKIES, SIS_PRESETS, type FetchLike, type SecretStore } from "@sd/connectors";
 import type { SchoolConfig } from "./config.js";
-import { deleteSetting, type Db } from "./db/client.js";
+import { deleteSetting, getSetting, setSetting, type Db } from "./db/client.js";
 import { silentNotifier, type Notifier } from "./notify.js";
 import { registerRoutes } from "./routes/index.js";
 import { launchChrome, type Launcher } from "./signin/chrome.js";
 import { Linker } from "./signin/link.js";
-import { SyncService } from "./sync/scheduler.js";
+import type { ProfileHost } from "./profiles.js";
+import { indexSome } from "./search/index.js";
+import { SyncService, gradescopeLaunch } from "./sync/scheduler.js";
 
 export interface AppDeps {
   db: Db;
@@ -26,6 +28,12 @@ export interface AppDeps {
   /** How often to check whether the sign-in window is signed in yet (tests use a short value). */
   linkPollMs?: number;
   renewMs?: number;
+  /** Read course files into the search index after each sync (tests turn it off). */
+  indexFiles?: boolean;
+  /** Pause between files while indexing. */
+  indexGapMs?: number;
+  /** Several profiles on this Mac (index.ts); absent in tests = just this one. */
+  profiles?: ProfileHost;
 }
 
 /** What every route gets. */
@@ -38,6 +46,8 @@ export interface AppContext {
   sync: SyncService;
   linker: Linker;
   dataDir?: string;
+  profiles?: ProfileHost;
+  notifier: Notifier;
 }
 
 const LOCAL_HOST = /^(127\.0\.0\.1|localhost)(:\d+)?$/;
@@ -56,6 +66,18 @@ const TYPES: Record<string, string> = {
   ".map": "application/json",
 };
 
+/**
+ * Fix addresses saved by an earlier version: a school's Canvas information
+ * site saved as if it were Canvas, or an SIS front door that wasn't known yet.
+ */
+function repairSchoolAddresses(db: Db): void {
+  const cv = normalizeBaseUrl(getSetting(db, "CANVAS_BASE_URL"));
+  const real = cv ? presetLmsFor(cv) : undefined;
+  if (real) setSetting(db, "CANVAS_BASE_URL", real);
+  const preset = SIS_PRESETS[getSetting(db, "SCHOOL_PRESET") ?? ""];
+  if (preset?.sisStart && !getSetting(db, "SIS_START_URL")) setSetting(db, "SIS_START_URL", preset.sisStart);
+}
+
 /** Build the API without listening, so tests can call it with app.inject(). */
 export function buildApp(deps: AppDeps): FastifyInstance & { ctx: AppContext } {
   const env = deps.env ?? process.env;
@@ -71,6 +93,7 @@ export function buildApp(deps: AppDeps): FastifyInstance & { ctx: AppContext } {
     bodyLimit: 1024 * 1024,
   });
 
+  repairSchoolAddresses(deps.db);
   const sync = new SyncService({ db: deps.db, cfg: deps.cfg, secrets: deps.secrets, env, fetch: fetchImpl, notifier: deps.notifier ?? silentNotifier });
   const linker = new Linker({
     db: deps.db,
@@ -81,14 +104,60 @@ export function buildApp(deps: AppDeps): FastifyInstance & { ctx: AppContext } {
     dataDir: deps.dataDir,
     pollMs: deps.linkPollMs,
     renewMs: deps.renewMs,
+    gradescopeLaunch: () => gradescopeLaunch(deps.db),
+    onlyBase: normalizeBaseUrl(env.DEMO_ONLY_BASE),
     onLinked: async (target) => {
       deleteSetting(deps.db, `RENEW_AFTER_${target}`);
       deleteSetting(deps.db, `RENEW_TRIES_${target}`);
       await sync.runFresh({ deep: true });
+      if (target === "canvas" || target === "blackboard") wantSis();
     },
   });
   sync.renew = (target) => linker.renew(target);
-  const ctx: AppContext = { db: deps.db, cfg: deps.cfg, secrets: deps.secrets, env, fetch: fetchImpl, sync, linker, dataDir: deps.dataDir };
+  // Once Blackboard is in and it has a link into Gradescope, fetch Gradescope too, without being asked.
+  // Deferred a moment so a Blackboard link that is just finishing can report "done" first.
+  // Tried quietly first (no window at all); a window only opens if that doesn't get in.
+  sync.wantGradescope = () => {
+    if (env.DEMO_ONLY_BASE) return;
+    const t = setTimeout(() => {
+      void (async () => {
+        if (await linker.renew("gradescope")) {
+          setSetting(deps.db, "GRADESCOPE_SESSION_EXPIRED", "false");
+          await sync.runFresh();
+        } else await linker.start("gradescope");
+      })().catch(() => undefined);
+    }, deps.linkPollMs ?? 1500);
+    t.unref();
+  };
+  // A school whose SIS is known (a preset) gets it linked right after its Canvas or Blackboard,
+  // quietly first: the sign-in browser usually still holds the school's single sign-on.
+  const wantSis = () => {
+    const e = sync.env();
+    if (!normalizeBaseUrl(e.SIS_BASE_URL) || e.SIS_AUTOLINK_OFF === "true") return;
+    const t = setTimeout(() => {
+      void (async () => {
+        if (await deps.secrets.get(SIS_COOKIES)) return;
+        if (await linker.renew("sis")) {
+          setSetting(deps.db, "SIS_SESSION_EXPIRED", "false");
+          await sync.runFresh({ deep: true });
+        } else await linker.start("sis");
+      })().catch(() => undefined);
+    }, deps.linkPollMs ?? 1500);
+    t.unref();
+  };
+  let indexing = false;
+  if (deps.indexFiles !== false) {
+    sync.afterRun = async () => {
+      if (indexing) return;
+      indexing = true;
+      try {
+        await indexSome(ctx, 25, deps.indexGapMs ?? 1500);
+      } finally {
+        indexing = false;
+      }
+    };
+  }
+  const ctx: AppContext = { db: deps.db, cfg: deps.cfg, secrets: deps.secrets, env, fetch: fetchImpl, sync, linker, dataDir: deps.dataDir, profiles: deps.profiles, notifier: deps.notifier ?? silentNotifier };
 
   // Uploads arrive as raw bytes; the filename travels in ?name=.
   app.addContentTypeParser(
@@ -122,7 +191,7 @@ export function buildApp(deps: AppDeps): FastifyInstance & { ctx: AppContext } {
   app.addHook("onSend", async (req, reply) => {
     reply.header("x-content-type-options", "nosniff");
     reply.header("referrer-policy", "no-referrer");
-    reply.header("x-frame-options", "DENY");
+    if (!reply.hasHeader("x-frame-options")) reply.header("x-frame-options", "DENY");
     reply.header("cross-origin-resource-policy", "same-origin");
     if (!reply.hasHeader("content-security-policy")) reply.header("content-security-policy", CSP);
     if (req.url.startsWith("/api/") || req.url.startsWith("/auth/")) reply.header("cache-control", "no-store");

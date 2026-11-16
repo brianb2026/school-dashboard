@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, colorVar, enc } from "../lib/api";
-import { courseMap, Feedback, useAction, useDash } from "../lib/dash";
+import { courseMap, Feedback, lmsName, lmsOf, useAction, useDash } from "../lib/dash";
 import { relativeDue } from "../lib/format";
 import { Panel } from "../panels/Panel";
 
@@ -20,7 +20,7 @@ interface Item {
 }
 
 export function Inbox() {
-  const { d, reload, compose, go } = useDash();
+  const { d, reload, compose, go, patch, toast } = useDash();
   const cm = courseMap(d);
   const [openId, setOpenId] = useState<string>();
   const [bodies, setBodies] = useState<Record<string, string>>({});
@@ -30,7 +30,7 @@ export function Inbox() {
 
   const items: Item[] = [
     ...d.announcements.map((a) => ({
-      id: a.id, kind: "announcement" as const, from: cm.get(a.courseId ?? "")?.code ?? "Blackboard", subject: a.title, at: a.postedAt,
+      id: a.id, kind: "announcement" as const, from: cm.get(a.courseId ?? "")?.code ?? "School", subject: a.title, at: a.postedAt,
       unread: !a.read, courseId: a.courseId, body: a.body, url: a.source.url,
     })),
     ...d.messages.map((m) => ({
@@ -41,6 +41,22 @@ export function Inbox() {
     .filter((i) => !onlyUnread || i.unread || i.id === openId)
     .sort((a, b) => b.at.localeCompare(a.at));
   const open = items.find((i) => i.id === openId);
+
+  /** Hide an announcement for good (Undo for a few seconds). It stays in Blackboard. */
+  const dismiss = (id: string) => {
+    const gone = d.announcements.find((a) => a.id === id);
+    setOpenId(undefined);
+    patch((x) => ({ ...x, announcements: x.announcements.filter((a) => a.id !== id) }));
+    const call = (dismissed: boolean) => api(`/api/announcements/${enc(id)}/dismiss`, { method: "POST", json: { dismissed } });
+    void call(true).catch((e: Error) => {
+      toast(e.message);
+      void reload();
+    });
+    toast("Announcement dismissed.", () => {
+      if (gone) patch((x) => ({ ...x, announcements: [gone, ...x.announcements].sort((a, b) => b.postedAt.localeCompare(a.postedAt)) }));
+      void call(false).then(reload);
+    });
+  };
 
   const show = (i: Item) => {
     setOpenId(i.id === openId ? undefined : i.id);
@@ -64,12 +80,12 @@ export function Inbox() {
         <span className="spacer" />
         {!d.links.gmail.connected && (
           <span className="faint" style={{ fontSize: 12 }}>
-            Announcements come from Blackboard. To see teacher email here too, <button type="button" className="link" onClick={() => go("Settings")}>connect Gmail</button> (optional).
+            Announcements come from {lmsName(d)}. To see teacher email here too, <button type="button" className="link" onClick={() => go("Settings")}>connect Gmail</button> (optional).
           </span>
         )}
       </div>
       <Panel title="Teachers and announcements" meta={`${items.filter((i) => i.unread).length} unread`}>
-        {items.length === 0 && <p className="empty">{onlyUnread ? "Nothing unread." : "No announcements yet. They arrive with the next Blackboard sync."}</p>}
+        {items.length === 0 && <p className="empty">{onlyUnread ? "Nothing unread." : "No announcements yet. They arrive with the next sync."}</p>}
         {items.map((i) => {
           const c = cm.get(i.courseId ?? "");
           const isOpen = i.id === openId;
@@ -81,7 +97,7 @@ export function Inbox() {
                   <span className="chip" style={{ marginRight: 10 }}><span className="swatch" style={{ background: colorVar(c?.color) }} />{i.from}</span>
                   {i.subject}
                 </div>
-                <span className="chip"><span className="tag">{i.kind}</span><span className="num faint">{relativeDue(i.at)}</span></span>
+                <span className="chip">{i.kind === "email" && <span className="tag">email</span>}<span className="num faint">{relativeDue(i.at)}</span></span>
               </button>
               {isOpen && (
                 <div className="msg-body">
@@ -107,7 +123,12 @@ export function Inbox() {
                         Mark unread
                       </button>
                     )}
-                    {i.url && <a className="btn ghost" href={i.url} target="_blank" rel="noreferrer noopener">Open in {i.kind === "email" ? "Gmail" : "Blackboard"}</a>}
+                    {i.kind === "announcement" && (
+                      <button type="button" className="btn ghost" onClick={() => dismiss(i.id)}>
+                        Dismiss
+                      </button>
+                    )}
+                    {i.url && <a className="btn ghost" href={i.url} target="_blank" rel="noreferrer noopener">Open in {i.kind === "email" ? "Gmail" : lmsOf(i.courseId)}</a>}
                   </div>
                   <Feedback error={act.error} />
                 </div>

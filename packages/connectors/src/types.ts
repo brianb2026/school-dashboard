@@ -1,8 +1,7 @@
 import type {
   Announcement,
   Assignment,
-  AttendanceRecord,
-  AttendanceSummary,
+  ContentItem,
   Course,
   CourseFile,
   CourseOverall,
@@ -10,6 +9,7 @@ import type {
   GradingScheme,
   Message,
   OutgoingMessage,
+  SisRecord,
   SourceId,
 } from "@sd/core";
 import type { FetchLike } from "./net.js";
@@ -19,7 +19,6 @@ export type Capability =
   | "courses"
   | "assignments"
   | "grades"
-  | "attendance"
   | "announcements"
   | "messages"
   | "download"
@@ -41,11 +40,13 @@ export interface SyncResult {
   grades?: GradeEntry[];
   schemes?: GradingScheme[];
   overall?: CourseOverall[];
-  attendance?: AttendanceRecord[];
-  attendanceSummaries?: AttendanceSummary[];
   announcements?: Announcement[];
   messages?: Message[];
   files?: CourseFile[];
+  /** The official record from the student information system. */
+  sis?: SisRecord;
+  /** Each course's content tree, replaced whole on every sync. */
+  contents?: { courseId: string; items: ContentItem[] }[];
   /**
    * What this result is the whole truth for. Rows under these id prefixes
    * that are not in the result get removed, so things deleted at the source
@@ -60,6 +61,13 @@ export interface SyncResult {
   };
   /** Plain-language notes for the Connections panel ("announcements: not shared with students"). */
   notes?: string[];
+  /** Things one source learns that another needs. */
+  extras?: {
+    /** Blackboard paths that open Gradescope with your Blackboard sign-in. */
+    gradescopeLaunch?: string[];
+    /** Your first name as your school has it, for the sign-in screen. */
+    studentName?: string;
+  };
 }
 
 export interface SecretStore {

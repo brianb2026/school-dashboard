@@ -62,7 +62,7 @@ export function Compose({ draft, onClose }: { draft: ComposeDraft; onClose: () =
             <input list="people" value={to} onChange={(e) => setTo(e.target.value)} placeholder="name@school.edu" type="email" autoFocus={!first} />
             <datalist id="people">{people.map((p) => <option key={`${p.email}${p.code}`} value={p.email}>{p.label}</option>)}</datalist>
           </label>
-          {people.length === 0 && <span className="faint">Instructor addresses come from Blackboard and your syllabi. None found yet, so type one.</span>}
+          {people.length === 0 && <span className="faint">Instructor addresses come from your classes and syllabi. None found yet, so type one.</span>}
           <label>
             Start from
             <select

@@ -5,10 +5,10 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import {
   matchCourse,
   type Announcement,
+  type ContentItem,
+  type SisRecord,
   type Assignment,
   type AssignmentPatch,
-  type AttendanceRecord,
-  type AttendanceSummary,
   type Course,
   type CourseAlias,
   type CourseFile,
@@ -127,7 +127,7 @@ export function deleteCourse(db: Db, id: string): void {
     for (const a of json<Assignment>(db.prepare("SELECT data FROM assignments WHERE course_id = ?").all(id))) {
       upsertAssignment(db, { ...a, courseId: "unassigned" });
     }
-    for (const t of ["grading_schemes", "course_aliases", "grades", "course_overall", "attendance", "attendance_summary", "files"]) {
+    for (const t of ["grading_schemes", "course_aliases", "grades", "course_overall", "files"]) {
       db.prepare(`DELETE FROM ${t} WHERE course_id = ?`).run(id);
     }
     db.prepare("UPDATE syllabi SET course_id = NULL, confirmed = 0, applied = NULL WHERE course_id = ?").run(id);
@@ -272,44 +272,73 @@ export function listOverall(db: Db): CourseOverall[] {
   return json<CourseOverall>(db.prepare("SELECT data FROM course_overall").all());
 }
 
-// ---------- attendance, announcements, messages, files ----------
+// ---------- announcements, messages, files ----------
 
-export function listAttendance(db: Db): AttendanceRecord[] {
-  return db
-    .prepare("SELECT course_id, date, source, status FROM attendance ORDER BY date DESC")
-    .all()
-    .map((r) => ({
-      courseId: String(r.course_id),
-      date: String(r.date),
-      status: String(r.status) as AttendanceRecord["status"],
-      source: { source: String(r.source) as AttendanceRecord["source"]["source"], fetchedAt: "" },
-    }));
-}
-
-export function upsertAttendance(db: Db, x: AttendanceRecord): void {
-  db.prepare(
-    "INSERT INTO attendance (course_id, date, source, status) VALUES (?, ?, ?, ?) ON CONFLICT(course_id, date, source) DO UPDATE SET status=excluded.status",
-  ).run(x.courseId, x.date, x.source.source, x.status);
-}
-
-export function deleteAttendance(db: Db, courseId: string, date: string, source: string): void {
-  db.prepare("DELETE FROM attendance WHERE course_id = ? AND date = ? AND source = ?").run(courseId, date, source);
-}
-
-export function listAttendanceSummaries(db: Db): AttendanceSummary[] {
-  return json<AttendanceSummary>(db.prepare("SELECT data FROM attendance_summary").all());
-}
-
-/** Newest first; the `read` flag you set is kept across re-syncs. */
+/** Newest first, minus the ones you dismissed; the `read` flag you set is kept across re-syncs. */
 export function listAnnouncements(db: Db, limit = 60): Announcement[] {
   return db
-    .prepare("SELECT data, read FROM announcements ORDER BY posted_at DESC LIMIT ?")
+    .prepare("SELECT data, read FROM announcements WHERE dismissed = 0 ORDER BY posted_at DESC LIMIT ?")
     .all(limit)
     .map((r) => ({ ...(JSON.parse(String(r.data)) as Announcement), read: Boolean(r.read) }));
 }
 
 export function markAnnouncementRead(db: Db, id: string, read: boolean): boolean {
   return Number(db.prepare("UPDATE announcements SET read = ? WHERE id = ?").run(read ? 1 : 0, id).changes) > 0;
+}
+
+/** Dismissing also marks it read; un-dismissing (undo) leaves it read. */
+export function dismissAnnouncement(db: Db, id: string, dismissed: boolean): boolean {
+  const sql = dismissed ? "UPDATE announcements SET dismissed = 1, read = 1 WHERE id = ?" : "UPDATE announcements SET dismissed = 0 WHERE id = ?";
+  return Number(db.prepare(sql).run(id).changes) > 0;
+}
+
+export interface ChangeRow {
+  id: number;
+  at: string;
+  kind: "grade" | "due-moved" | "new-assignment" | "file" | "announcement";
+  courseId?: string;
+  ref: string;
+  data: { title?: string; name?: string; from?: string; to?: string; dueAt?: string; score?: number; possible?: number; was?: number };
+  seen: boolean;
+  notified: boolean;
+}
+
+/** Changes from the last `days` days, newest first. */
+export function listChanges(db: Db, days = 14): ChangeRow[] {
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  return db
+    .prepare("SELECT * FROM changes WHERE at >= ? ORDER BY id DESC LIMIT 300")
+    .all(since)
+    .map((r) => ({
+      id: Number(r.id),
+      at: String(r.at),
+      kind: String(r.kind) as ChangeRow["kind"],
+      courseId: r.course_id === null ? undefined : String(r.course_id),
+      ref: String(r.ref),
+      data: JSON.parse(String(r.data)) as ChangeRow["data"],
+      seen: Number(r.seen) === 1,
+      notified: Number(r.notified) === 1,
+    }));
+}
+
+export function markChangesSeen(db: Db, upTo: number): void {
+  db.prepare("UPDATE changes SET seen = 1 WHERE id <= ?").run(upTo);
+}
+
+export function markChangeNotified(db: Db, id: number): void {
+  db.prepare("UPDATE changes SET notified = 1 WHERE id = ?").run(id);
+}
+
+/** The last record read from the SIS, if any. */
+export function getSisRecord(db: Db): SisRecord | undefined {
+  const row = db.prepare("SELECT data FROM sis_record WHERE id = 1").get();
+  return row ? (JSON.parse(String(row.data)) as SisRecord) : undefined;
+}
+
+/** A course's content tree as of the last sync (empty until one has run). */
+export function getContents(db: Db, courseId: string): { items: ContentItem[]; fetchedAt?: string } {
+  const row = db.prepare("SELECT data, fetched_at FROM course_contents WHERE course_id = ?").get(courseId);
+  return row ? { items: JSON.parse(String(row.data)) as ContentItem[], fetchedAt: String(row.fetched_at) } : { items: [] };
 }
 
 export function listMessages(db: Db, limit = 60): Message[] {
@@ -343,16 +372,51 @@ function prune(db: Db, table: string, idCol: string, prefixes: string[] | undefi
 }
 
 /** Store whatever a connector returned, and drop what it no longer has. */
-export function saveSync(db: Db, r: SyncResult): void {
+/** Sources whose dates are the school's own (a syllabus re-read or your own entry moving isn't news). */
+const DATED_SOURCES = new Set(["blackboard-session", "blackboard-rest", "blackboard-ical", "canvas", "gradescope"]);
+
+/**
+ * Save one source's sync. With `record`, also note what changed (a new
+ * grade, a deadline that moved, new work, files, announcements) for the
+ * "What changed" list. A source's first sync is saved without notes, so
+ * linking something doesn't bury you in old news.
+ */
+export function saveSync(db: Db, r: SyncResult, opts: { record?: boolean } = {}): void {
+  const at = new Date().toISOString();
+  const note = db.prepare("INSERT INTO changes (at, kind, course_id, ref, data) VALUES (?, ?, ?, ?, ?)");
+  const record = (kind: string, courseId: string | undefined, ref: string, data: object) => {
+    if (opts.record) note.run(at, kind, courseId ?? null, ref, JSON.stringify(data));
+  };
   tx(db, () => {
+    // Courses seen before this sync: things in a course that just appeared aren't "new" to you.
+    const knownCourse = new Set(listCourses(db).map((c) => c.id));
     for (const c of r.courses ?? []) upsertCourse(db, mergeSyncedCourse(getCourse(db, c.id), c));
 
+    const prevA = db.prepare("SELECT course_id, data FROM assignments WHERE id = ?");
     for (const a of r.assignments ?? []) {
+      const before = prevA.get(a.id);
+      const old = before ? (JSON.parse(String(before.data)) as Assignment) : undefined;
       // Keep a course you (or an alias) already chose when the source still doesn't know it.
-      const prev = a.courseId === "unassigned" ? db.prepare("SELECT course_id FROM assignments WHERE id = ?").get(a.id) : undefined;
-      upsertAssignment(db, prev ? { ...a, courseId: String(prev.course_id) } : a);
+      const courseId = a.courseId === "unassigned" && before ? String(before.course_id) : a.courseId;
+      upsertAssignment(db, { ...a, courseId });
+      const dated = a.sources.some((s) => DATED_SOURCES.has(s.source));
+      if (!dated || !knownCourse.has(courseId)) continue;
+      if (!old) record("new-assignment", courseId, a.id, { title: a.title, dueAt: a.dueAt, kind: a.kind });
+      else if (old.dueAt && a.dueAt && Math.abs(Date.parse(old.dueAt) - Date.parse(a.dueAt)) > 60_000) {
+        record("due-moved", courseId, a.id, { title: a.title, from: old.dueAt, to: a.dueAt });
+      }
     }
-    for (const g of r.grades ?? []) upsertGrade(db, g);
+    const prevG = db.prepare("SELECT data FROM grades WHERE assignment_id = ? AND source = ?");
+    for (const g of r.grades ?? []) {
+      const before = prevG.get(g.assignmentId, g.source.source);
+      const old = before ? (JSON.parse(String(before.data)) as GradeEntry) : undefined;
+      upsertGrade(db, g);
+      if (g.score === undefined || !knownCourse.has(g.courseId)) continue;
+      if (!old || old.score !== g.score || old.pointsPossible !== g.pointsPossible) {
+        const title = (r.assignments ?? []).find((a) => a.id === g.assignmentId)?.title;
+        record("grade", g.courseId, g.assignmentId, { title, score: g.score, possible: g.pointsPossible, ...(old?.score !== undefined ? { was: old.score } : {}) });
+      }
+    }
     for (const s of r.schemes ?? []) upsertScheme(db, s);
 
     const auth = r.authoritative;
@@ -366,18 +430,16 @@ export function saveSync(db: Db, r: SyncResult): void {
       prune(db, "grades", "assignment_id", auth.assignments, keepG, "AND source != 'manual'");
     }
 
-    for (const id of auth?.overall ?? []) {
-      db.prepare("DELETE FROM course_overall WHERE course_id = ?").run(id);
-      db.prepare("DELETE FROM attendance_summary WHERE course_id = ? AND source = 'qwickly'").run(id);
-    }
+    for (const id of auth?.overall ?? []) db.prepare("DELETE FROM course_overall WHERE course_id = ?").run(id);
     const ov = db.prepare(
       "INSERT INTO course_overall (course_id, source, kind, data) VALUES (?, ?, ?, ?) ON CONFLICT(course_id, source, kind) DO UPDATE SET data=excluded.data",
     );
     for (const o of r.overall ?? []) ov.run(o.courseId, o.source.source, o.kind, JSON.stringify(o));
-    const sum = db.prepare("INSERT INTO attendance_summary (course_id, source, data) VALUES (?, ?, ?) ON CONFLICT(course_id, source) DO UPDATE SET data=excluded.data");
-    for (const s of r.attendanceSummaries ?? []) sum.run(s.courseId, s.source.source, JSON.stringify(s));
-    for (const x of r.attendance ?? []) upsertAttendance(db, x);
 
+    const seenAnn = db.prepare("SELECT 1 AS x FROM announcements WHERE id = ?");
+    for (const x of r.announcements ?? []) {
+      if (!seenAnn.get(x.id) && (!x.courseId || knownCourse.has(x.courseId))) record("announcement", x.courseId, x.id, { title: x.title });
+    }
     const ann = db.prepare(
       "INSERT INTO announcements (id, course_id, posted_at, read, data) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET course_id=excluded.course_id, posted_at=excluded.posted_at, data=excluded.data",
     );
@@ -390,11 +452,27 @@ export function saveSync(db: Db, r: SyncResult): void {
     for (const x of r.messages ?? []) msg.run(x.id, x.threadId, x.courseId ?? null, x.receivedAt, x.unread ? 1 : 0, JSON.stringify(x));
     if (auth?.messages) prune(db, "messages", "id", ["gmail:"], new Set((r.messages ?? []).map((x) => x.id)));
 
+    const seenFile = db.prepare("SELECT 1 AS x FROM files WHERE id = ?");
+    for (const f of r.files ?? []) {
+      if (!seenFile.get(f.id) && knownCourse.has(f.courseId)) record("file", f.courseId, f.id, { name: f.name });
+    }
     const file = db.prepare(
       "INSERT INTO files (id, course_id, is_syllabus, data) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET course_id=excluded.course_id, is_syllabus=excluded.is_syllabus, data=excluded.data",
     );
     for (const f of r.files ?? []) file.run(f.id, f.courseId, f.isSyllabus ? 1 : 0, JSON.stringify(f));
     prune(db, "files", "id", auth?.files, new Set((r.files ?? []).map((f) => f.id)));
+
+    const now = new Date().toISOString();
+    const page = db.prepare(
+      "INSERT INTO course_contents (course_id, fetched_at, data) VALUES (?, ?, ?) ON CONFLICT(course_id) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data",
+    );
+    for (const c of r.contents ?? []) page.run(c.courseId, now, JSON.stringify(c.items));
+    if (r.sis) {
+      db.prepare("INSERT INTO sis_record (id, fetched_at, data) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data").run(
+        r.sis.fetchedAt,
+        JSON.stringify(r.sis),
+      );
+    }
   });
 }
 
@@ -461,8 +539,8 @@ export function markNotified(db: Db, keys: string[]): void {
 }
 
 const TABLES = [
-  "courses", "assignments", "grades", "grading_schemes", "attendance", "announcements", "messages", "syllabi", "sync_log",
-  "settings", "course_aliases", "course_overall", "attendance_summary", "files", "assignment_overrides", "notified",
+  "courses", "assignments", "grades", "grading_schemes", "announcements", "messages", "syllabi", "sync_log",
+  "settings", "course_aliases", "course_overall", "files", "assignment_overrides", "notified", "course_contents", "sis_record", "changes", "file_text", "file_search",
 ];
 
 /** Delete every row of school data (the "wipe my data" button). */

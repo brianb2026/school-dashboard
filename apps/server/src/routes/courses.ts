@@ -18,6 +18,7 @@ import {
   deleteCourse,
   deleteScheme,
   getCourse,
+  getContents,
   listAliases,
   listCourses,
   listUnassigned,
@@ -106,6 +107,9 @@ export function courseRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, cfg } = ctx;
 
   app.get("/api/courses", async () => listCourses(db).filter((c) => !c.hidden));
+
+  /** The course page as Blackboard lays it out (folders, pages, files, tools), from the last sync. */
+  app.get<{ Params: { id: string } }>("/api/courses/:id/contents", async (req) => getContents(db, req.params.id));
 
   app.post<{ Body: Partial<NewCourse> }>("/api/courses", async (req, reply) => {
     const nc = cleanCourse(req.body);

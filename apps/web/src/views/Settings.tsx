@@ -1,5 +1,11 @@
 import { useState } from "react";
 import type { ConnectorInfo, CourseLevel, CourseView, SettingsInfo, SyncReport, UnmatchedItem } from "@sd/core";
+import { ClassTimes } from "../components/ClassTimes";
+import { pickTheme, ThemePicker } from "../components/ThemeMenu";
+import { ReadingsList } from "../components/ReadingsMenu";
+import { Switch } from "../components/Switch";
+import { setPref } from "../lib/prefs";
+import { savedTheme, type Theme } from "../lib/theme";
 import { LinkBlackboard } from "../components/LinkBlackboard";
 import { api, COLOR_NAMES, COURSE_COLORS, colorVar, enc, useApi } from "../lib/api";
 import { Feedback, useAction, useDash } from "../lib/dash";
@@ -8,6 +14,109 @@ import { Panel } from "../panels/Panel";
 
 const LEVELS: CourseLevel[] = ["regular", "honors", "ap", "ib", "de"];
 const LEVEL_LABEL: Record<CourseLevel, string> = { regular: "Regular", honors: "Honors", ap: "AP", ib: "IB", de: "Dual enrollment" };
+
+/** Search inside course files: the app reads them a few at a time to build a search index on this Mac. */
+function FileSearch() {
+  const s = useApi<{ indexed: number; readable: number; on: boolean }>("/api/search/status");
+  const a = useAction();
+  if (!s.data) return null;
+  return (
+    <div className="brief-set">
+      <p className="menu-note">Search inside files (⌘K)</p>
+      <Switch
+        on={s.data.on}
+        onChange={(on) =>
+          void a.run(async () => {
+            await api("/api/search", { method: "PUT", json: { on } });
+            await s.reload();
+          })
+        }
+        label={s.data.on ? `on · ${s.data.indexed} of ${s.data.readable} files read` : "off"}
+      />
+      <p className="faint" style={{ fontSize: 12, margin: "4px 0 0", maxWidth: "46ch" }}>
+        PDFs, slides, Word and text files are read on this Mac, a few after each sync. Turning it off forgets what was read.
+      </p>
+      <Feedback error={a.error} />
+    </div>
+  );
+}
+
+/** The morning brief: one notification a day with today's classes, what's due, and what changed. */
+function Brief() {
+  const b = useApi<{ time: string; lines: string[] }>("/api/brief");
+  const [time, setTime] = useState<string>();
+  const a = useAction();
+  if (!b.data) return null;
+  const on = b.data.time !== "off";
+  const shown = time ?? (on ? b.data.time : "08:00");
+  const save = (t: string) =>
+    a.run(async () => {
+      await api("/api/brief", { method: "PUT", json: { time: t } });
+      await b.reload();
+    });
+  return (
+    <div className="brief-set">
+      <p className="menu-note">Morning brief (a Mac notification)</p>
+      <div className="inline-form">
+        <Switch on={on} onChange={(v) => void save(v ? shown : "off")} label={on ? "at" : "off"} />
+        <input
+          type="time"
+          value={shown}
+          disabled={!on}
+          onChange={(e) => setTime(e.target.value)}
+          onBlur={() => time && time !== b.data!.time && void save(time)}
+          aria-label="Morning brief time"
+        />
+        <button type="button" className="btn ghost sm" disabled={a.busy} onClick={() => void a.run(async () => { await api("/api/brief/send", { method: "POST", json: {} }); return "Sent."; })}>
+          Send one now
+        </button>
+      </div>
+      <ul className="brief-preview">
+        {b.data.lines.map((l) => (
+          <li key={l}>{l}</li>
+        ))}
+      </ul>
+      <Feedback error={a.error} done={a.done} />
+    </div>
+  );
+}
+
+/** How the dashboard looks: theme, readings, the tour. */
+function Display() {
+  const { d, go } = useDash();
+  const [theme, setTheme] = useState<Theme>(savedTheme);
+  return (
+    <Panel title="Display" meta="saved in this browser">
+      <div className="display pad">
+        <ThemePicker
+          value={theme}
+          onPick={(t) => {
+            setTheme(t);
+            pickTheme(t);
+          }}
+        />
+        <div className="display-side">
+          <div>
+            <p className="menu-note">Readings (“read chapter 3 for class”)</p>
+            <ReadingsList courses={d.courses} />
+          </div>
+          <Brief />
+          <FileSearch />
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              setPref("tour", undefined);
+              go("Home");
+            }}
+          >
+            Show the tour again
+          </button>
+        </div>
+      </div>
+    </Panel>
+  );
+}
 
 export function Settings() {
   const { d, reload } = useDash();
@@ -24,9 +133,18 @@ export function Settings() {
 
   return (
     <div className="stack">
-      <Blackboard info={s} onChanged={refresh} />
+      {s.demo && (
+        <div className="notice warn">
+          This is the <b>demo</b>, with made-up classes. It only links to its own pretend Blackboard and is erased each time it starts. For your real classes, run <code>npm start</code> (or double-click start.command).
+        </div>
+      )}
+      {(d.links.blackboard.linked || !d.links.canvas.linked) && <Blackboard info={s} onChanged={refresh} />}
+      {(d.links.canvas.linked || !d.links.blackboard.linked) && <Canvas onChanged={refresh} />}
+      <Sis onChanged={refresh} />
+      <Display />
       {(unmatched.data?.length ?? 0) > 0 && <Unmatched items={unmatched.data ?? []} courses={d.courses} onChanged={refresh} />}
       <Courses onChanged={refresh} />
+      <ClassTimes />
       <Extras info={s} onChanged={refresh} />
       <Connections connectors={connectors.data ?? []} onSynced={refresh} />
       <About info={s} onChanged={refresh} />
@@ -46,8 +164,8 @@ function Blackboard({ info, onChanged }: { info: SettingsInfo; onChanged: () => 
       <div className="pad">
         {bb.linked && !bb.expired && (
           <p className="help">
-            Linked. Courses, grades, announcements and due dates refresh every 30 minutes; files and syllabi every few hours. If the sign-in ever lapses you'll see a
-            Reconnect button, and it often renews by itself.
+            Linked. Courses, grades, announcements, due dates, files and syllabi refresh by themselves every 30 minutes, and right after you link anything. If the
+            sign-in ever lapses you'll see a Reconnect button, and it often renews by itself.
           </p>
         )}
         {!info.chromeFound && !bb.linked && (
@@ -59,6 +177,138 @@ function Blackboard({ info, onChanged }: { info: SettingsInfo; onChanged: () => 
             <button type="button" className="btn" disabled={a.busy}
               onClick={() => confirm("Unlink Blackboard? The saved sign-in is deleted. What was already pulled in stays until you wipe it.") &&
                 void a.run(async () => { await api("/api/link/blackboard", { method: "DELETE" }); await onChanged(); return "Unlinked. The saved sign-in was deleted."; })}>
+              Unlink
+            </button>
+          </div>
+        )}
+        <Feedback error={a.error} done={a.done} />
+      </div>
+    </Panel>
+  );
+}
+
+/** Canvas: the sign-in window (any school), or a personal access token where a school allows it. */
+function Canvas({ onChanged }: { onChanged: () => Promise<void> }) {
+  const { d, link } = useDash();
+  const cv = d.links.canvas;
+  const [url, setUrl] = useState(cv.host ?? "");
+  const [token, setToken] = useState("");
+  const a = useAction();
+  return (
+    <Panel title="Canvas" meta={cv.linked ? (cv.expired ? <span className="warn-text">sign-in expired</span> : `linked · ${cv.host}${cv.via === "token" ? " · access token" : ""}`) : "not linked"}>
+      <div className="pad">
+        <p className="help">
+          For schools on Canvas (UVA's is canvas.its.virginia.edu). Classes, assignments with your scores, group weights, Canvas's own total, announcements,
+          modules and files come in, read-only.
+        </p>
+        <form
+          className="inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void link("canvas", url.trim() || undefined);
+          }}
+        >
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="canvas.school.edu" aria-label="Your school's Canvas address" autoComplete="off" spellCheck={false} />
+          <button type="submit" className="btn primary" disabled={!url.trim() && !cv.host}>
+            {cv.linked ? "Sign in again" : "Link Canvas"}
+          </button>
+        </form>
+        <details className="adv" style={{ marginTop: 10 }}>
+          <summary>Use an access token instead</summary>
+          <p className="help" style={{ marginTop: 8 }}>
+            Some schools let you make one in Canvas: Account → Settings → New access token. Paste it here. It's checked once, then kept encrypted on this Mac.
+          </p>
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void a.run(async () => {
+                await api("/api/link/canvas-token", { method: "PUT", json: { baseUrl: url.trim() || cv.host, token } });
+                setToken("");
+                await onChanged();
+                return "Linked with your token. Syncing now.";
+              });
+            }}
+          >
+            <input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Access token" aria-label="Canvas access token" autoComplete="off" />
+            <button type="submit" className="btn" disabled={a.busy || !token.trim() || (!url.trim() && !cv.host)}>
+              Save token
+            </button>
+          </form>
+        </details>
+        {cv.linked && (
+          <div className="inline-form" style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={a.busy}
+              onClick={() =>
+                confirm("Unlink Canvas? The saved sign-in (or token) is deleted, and what Canvas added is removed.") &&
+                void a.run(async () => {
+                  await api("/api/link/canvas", { method: "DELETE" });
+                  await onChanged();
+                  return "Unlinked.";
+                })
+              }
+            >
+              Unlink
+            </button>
+          </div>
+        )}
+        <Feedback error={a.error} done={a.done} />
+      </div>
+    </Panel>
+  );
+}
+
+/** The student information system (PeopleSoft, as at UVA): the official record, schedule, holds. */
+function Sis({ onChanged }: { onChanged: () => Promise<void> }) {
+  const { d, link } = useDash();
+  const s = d.links.sis;
+  const [url, setUrl] = useState(s.host ?? "");
+  const a = useAction();
+  const v = d.sis;
+  return (
+    <Panel title="Student information system (SIS)" meta={s.linked ? (s.expired ? <span className="warn-text">sign-in expired</span> : `linked · ${s.host}`) : "not linked"}>
+      <div className="pad">
+        <p className="help">
+          Reads your Student Center and course history: when and where each class meets, holds, enrollment dates, and your official grades (the GPA is
+          worked out from them). Works with PeopleSoft SIS sites, like UVA's (sisuva.admin.virginia.edu). It only reads; it never enrolls, drops or pays
+          anything. It's read when you sign in and a few times a day, because the SIS signs you out quickly.
+        </p>
+        {v && (
+          <p className="help">
+            Last read {ago(v.fetchedAt)}: {v.terms.reduce((n, t) => n + t.courses.length, 0)} courses on record
+            {v.gpa !== undefined ? `, GPA ${v.gpa.toFixed(2)}` : ""}, {v.holds.length} hold{v.holds.length === 1 ? "" : "s"}.
+          </p>
+        )}
+        <form
+          className="inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void link("sis", url.trim() || undefined);
+          }}
+        >
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="sis.school.edu" aria-label="Your school's SIS address" autoComplete="off" spellCheck={false} />
+          <button type="submit" className="btn primary" disabled={!url.trim() && !s.host}>
+            {s.linked ? "Sign in again" : "Link SIS"}
+          </button>
+        </form>
+        {s.linked && (
+          <div className="inline-form" style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              className="btn"
+              disabled={a.busy}
+              onClick={() =>
+                confirm("Unlink the SIS? The saved sign-in and the record read from it are deleted.") &&
+                void a.run(async () => {
+                  await api("/api/link/sis", { method: "DELETE" });
+                  await onChanged();
+                  return "Unlinked.";
+                })
+              }
+            >
               Unlink
             </button>
           </div>
@@ -202,7 +452,6 @@ function UnmatchedRow({ item, courses, onChanged }: { item: UnmatchedItem; cours
 function Extras({ info, onChanged }: { info: SettingsInfo; onChanged: () => Promise<void> }) {
   const { d, link } = useDash();
   const gs = d.links.gradescope;
-  const gm = d.links.gmail;
   const a = useAction();
   const [url, setUrl] = useState("");
   const cal = info.calendarLink;
@@ -211,34 +460,20 @@ function Extras({ info, onChanged }: { info: SettingsInfo; onChanged: () => Prom
       <div className="optin">
         <div className="optin-head"><b>Gradescope</b><span className={`tag ${gs.linked ? (gs.expired ? "warn" : "ok") : ""}`}>{gs.linked ? (gs.expired ? "expired" : "linked") : "off"}</span></div>
         <p className="help">
-          Scores that live only in Gradescope. Same idea as Blackboard: you sign in yourself in a window, the app only reads. Often not needed, because instructors usually
-          send Gradescope scores to Blackboard.
+          Scores that live in Gradescope, including ones your instructor never sends to Blackboard.{" "}
+          {gs.viaBlackboard
+            ? "Your school opens Gradescope through Blackboard, so there is nothing to type: it links by itself right after Blackboard, using the same sign-in."
+            : "You sign in yourself in a window; the app only reads."}
         </p>
         <div className="inline-form">
-          <button type="button" className="btn" onClick={() => void link("gradescope")}>{gs.linked ? "Sign in again" : "Link Gradescope"}</button>
+          <button type="button" className="btn" onClick={() => void link("gradescope")}>
+            {gs.linked ? (gs.viaBlackboard ? "Link again" : "Sign in again") : gs.viaBlackboard ? "Link through Blackboard" : "Link Gradescope"}
+          </button>
           {gs.linked && <button type="button" className="btn ghost" onClick={() => void a.run(async () => { await api("/api/link/gradescope", { method: "DELETE" }); await onChanged(); })}>Unlink</button>}
         </div>
       </div>
 
-      <div className="optin">
-        <div className="optin-head"><b>Gmail</b><span className={`tag ${gm.connected ? "ok" : ""}`}>{gm.connected ? "connected" : "off"}</span></div>
-        <p className="help">
-          Shows email from your teachers in the Inbox and sends your messages straight from the dashboard. Writing to a professor already works without this (it opens
-          Gmail with the message filled in).
-          {!gm.configured && <> Needs a one-time Google setup first: see <code>docs/connectors.md</code>, then put the client ID and secret in <code>.env</code>.</>}
-        </p>
-        <div className="inline-form">
-          <button type="button" className="btn" disabled={!gm.configured || a.busy}
-            onClick={() => void a.run(async () => {
-              const r = await api<{ openUrl: string }>("/api/link/gmail", { method: "POST", json: {} });
-              window.open(r.openUrl, "_blank", "noopener");
-              return "Finish signing in on Google's page, then come back here.";
-            })}>
-            {gm.connected ? "Connect again" : "Connect Gmail"}
-          </button>
-          {gm.connected && <button type="button" className="btn ghost" onClick={() => void a.run(async () => { await api("/api/link/gmail", { method: "DELETE" }); await onChanged(); })}>Disconnect</button>}
-        </div>
-      </div>
+      <Gmail info={info} onChanged={onChanged} />
 
       <div className="optin">
         <div className="optin-head"><b>Desktop alerts</b><span className={`tag ${info.notifications ? "ok" : ""}`}>{info.notifications ? "on" : "off"}</span></div>
@@ -279,6 +514,83 @@ function Extras({ info, onChanged }: { info: SettingsInfo; onChanged: () => Prom
       </details>
       <div className="pad-x"><Feedback error={a.error} done={a.done} /></div>
     </Panel>
+  );
+}
+
+/** Gmail: a one-time Google setup (done here, not in a file), then one click to connect. */
+function Gmail({ info, onChanged }: { info: SettingsInfo; onChanged: () => Promise<void> }) {
+  const { d } = useDash();
+  const gm = d.links.gmail;
+  const a = useAction();
+  const [id, setId] = useState("");
+  const [secret, setSecret] = useState("");
+  const [setup, setSetup] = useState(false);
+  const connect = () =>
+    a.run(async () => {
+      const r = await api<{ openUrl: string }>("/api/link/gmail", { method: "POST", json: {} });
+      window.open(r.openUrl, "_blank", "noopener");
+      return "Finish signing in on Google's page, then come back here. Mail syncs by itself once you do.";
+    });
+  const showSetup = !info.demo && (!gm.configured || setup);
+  return (
+    <div className="optin">
+      <div className="optin-head"><b>Gmail</b><span className={`tag ${gm.connected ? "ok" : ""}`}>{gm.connected ? "connected" : gm.configured ? "ready to connect" : "off"}</span></div>
+      <p className="help">
+        Shows email from your teachers in the Inbox and sends your messages straight from the dashboard. Writing to a professor already works without this (it opens
+        Gmail with the message filled in).
+      </p>
+      {info.demo && <p className="help">This is the demo. Start the real app (<code>npm start</code>) to connect Gmail.</p>}
+      {showSetup && (
+        <div className="setup">
+          <p className="help">
+            Google only lets an app read mail after a one-time setup that <b>you</b> own, so no one else's server ever sits between you and your mail. It takes about
+            five minutes and is free:
+          </p>
+          <ol className="steps">
+            <li>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer noopener">Google Cloud: new project</a> and create one (any name).</li>
+            <li>Turn on the <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noreferrer noopener">Gmail API</a> for it.</li>
+            <li>
+              On the <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noreferrer noopener">Google Auth page</a>, fill in the app name and your
+              email. Pick <b>Internal</b> if your school account offers it; otherwise <b>External</b>, and add yourself under <b>Test users</b>.
+            </li>
+            <li>
+              <a href="https://console.cloud.google.com/auth/clients/create" target="_blank" rel="noreferrer noopener">Create a client</a> of type <b>Desktop app</b>. Google
+              shows a client ID and a client secret: paste both below.
+            </li>
+          </ol>
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void a.run(async () => {
+                await api("/api/settings/gmail", { method: "PUT", json: { clientId: id, clientSecret: secret } });
+                setId("");
+                setSecret("");
+                setSetup(false);
+                await onChanged();
+                await connect();
+                return "Saved. Finish signing in on Google's page, then come back here.";
+              });
+            }}
+          >
+            <input placeholder="Client ID (ends with .apps.googleusercontent.com)" value={id} onChange={(e) => setId(e.target.value)} aria-label="Google client ID" autoComplete="off" spellCheck={false} />
+            <input type="password" placeholder="Client secret" value={secret} onChange={(e) => setSecret(e.target.value)} aria-label="Google client secret" autoComplete="off" style={{ flex: "0 1 220px" }} />
+            <button type="submit" className="btn primary" disabled={a.busy || !id.trim() || !secret.trim()}>Save and connect</button>
+          </form>
+          <p className="help faint">
+            The secret is stored encrypted on this Mac. Sign-in comes back to <code>{info.gmailRedirectUri}</code>, which a Desktop app client allows by itself.
+          </p>
+        </div>
+      )}
+      {!info.demo && gm.configured && (
+        <div className="inline-form">
+          <button type="button" className="btn" disabled={a.busy} onClick={() => void connect()}>{gm.connected ? "Connect again" : "Connect Gmail"}</button>
+          {gm.connected && <button type="button" className="btn ghost" onClick={() => void a.run(async () => { await api("/api/link/gmail", { method: "DELETE" }); await onChanged(); })}>Disconnect</button>}
+          {!setup && <button type="button" className="link faint-link" onClick={() => setSetup(true)}>change Google setup</button>}
+        </div>
+      )}
+      <Feedback error={a.error} done={a.done} />
+    </div>
   );
 }
 

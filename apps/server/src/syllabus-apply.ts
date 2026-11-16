@@ -64,6 +64,7 @@ export function validateConfirm(body: ConfirmSyllabus | undefined): string | und
     if (typeof it.date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(it.date) || Number.isNaN(Date.parse(it.date))) return `"${it.title}" has an invalid date.`;
     if (it.time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(it.time)) return `"${it.title}" has an invalid time.`;
     if (!KINDS.has(it.kind)) return `"${it.title}" has an unknown type.`;
+    if (it.url !== undefined && (typeof it.url !== "string" || it.url.length > 600 || !/^https?:\/\//i.test(it.url))) return `"${it.title}" has a link that doesn't look right.`;
   }
   if (body.instructorEmails.some((e) => typeof e !== "string" || e.length > 200)) return "Check the instructor email.";
   if (body.letterScale !== undefined && !validScale(body.letterScale)) return "The letter scale doesn't look right.";
@@ -75,7 +76,7 @@ export function autoBody(parse: SyllabusRecord["parse"], courseId: string): Conf
   return {
     courseId,
     weights: parse.weights.weights.map((w) => ({ name: w.name, weight: w.weight })),
-    items: parse.dates.map((d) => ({ date: d.date, title: d.title, kind: d.kind })),
+    items: parse.dates.map((d) => ({ date: d.date, time: d.time, title: d.title, kind: d.kind, url: d.url })),
     instructorEmails: parse.policies.instructorEmails,
     officeHours: parse.policies.officeHours,
     latePolicy: parse.policies.latePolicy,
@@ -118,6 +119,7 @@ export function applySyllabus(
         dueAt: zonedToIso(it.date, it.time || "23:59", cfg.timezone),
         status: "upcoming",
         submittable: false,
+        url: it.url,
         attachments: [],
         sources: [source],
       };
@@ -132,7 +134,11 @@ export function applySyllabus(
     const next: Course = {
       ...course,
       instructors: [...course.instructors, ...added],
-      policies: { officeHours: body.officeHours?.trim().slice(0, 300) || undefined, latePolicy: body.latePolicy?.trim().slice(0, 600) || undefined },
+      // A schedule page has no policies; it must not blank the ones the syllabus gave.
+      policies: {
+        officeHours: body.officeHours?.trim().slice(0, 300) || (auto ? course.policies?.officeHours : undefined),
+        latePolicy: body.latePolicy?.trim().slice(0, 600) || (auto ? course.policies?.latePolicy : undefined),
+      },
       sources: course.sources.some((s) => s.source === "syllabus" && s.externalId === rec.id) ? course.sources : [...course.sources, source],
     };
     // The instructor's own scale beats the school default; Blackboard's schema or your edit beats the syllabus.

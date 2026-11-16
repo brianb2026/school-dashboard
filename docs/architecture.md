@@ -6,9 +6,10 @@
   ical  ────┼─▶ blackboard/ical ──┐                                       │
   REST  ────┼─▶ blackboard/rest ──┤   sync loop (30 min)      React UI    │
   session ──┼─▶ blackboard/session┤──▶ saveSync() ─▶ SQLite ─▶ /api/* ──▶  │
+ Canvas ────┼─▶ canvas ───────────┤                  │                    │
+ SIS ───────┼─▶ sis (PeopleSoft) ─┤                  │                    │
  Gradescope─┼─▶ gradescope ───────┤                  │                    │
- Qwickly ───┼─▶ qwickly ──────────┤                  ├─▶ /calendar.ics ─▶ Google/Apple Calendar
- Gmail  ────┼─▶ gmail ────────────┘                  │                    │
+ Gmail  ────┼─▶ gmail ────────────┘                  ├─▶ /calendar.ics ─▶ Google/Apple Calendar
  Syllabus ──┼─▶ upload ─▶ syllabus-parser ─▶ review ─┘                    │
             │                  ▲                                          │
             │                  └── ai/ (optional, on click only)          │
@@ -20,7 +21,7 @@
 
 **`packages/core`**: the shared data model and all pure logic: `resolveCourseGrade` (which number is the class grade, with every alternative), `gradeTrend`, `requiredOnRemaining` (what-if), `gpa`, `mergeAssignments` (one row per real item across sources), `matchCourse`, `matchCategory`, `workloadByDay`, `findConflicts`, `assignmentsToIcs`, `htmlToText`. No I/O. The web UI imports the same functions to run what-ifs in the page.
 
-**`packages/connectors`**: one `Connector` per source: `status()`, `sync()` returning a partial `SyncResult` (plus which id prefixes it is authoritative for, so deletions propagate), optional `download()` and `sendMessage()`. Connectors never touch the database. The Blackboard code is split into a read-only HTTP client (`client.ts`), pure mapping (`map.ts`) and the sync pass (`sync.ts`), shared by the session and OAuth connectors.
+**`packages/connectors`**: one `Connector` per source: `status()`, `sync()` returning a partial `SyncResult` (plus which id prefixes it is authoritative for, so deletions propagate), optional `download()` and `sendMessage()`. Connectors never touch the database. The Blackboard code is split into a read-only HTTP client (`client.ts`), pure mapping (`map.ts`) and the sync pass (`sync.ts`), shared by the session and OAuth connectors. `canvas/` has the same split (a GET-only client that strips `while(1);` and follows `Link` headers, and pure `mapCanvasCourse`). `sis/` reads PeopleSoft student pages with a small table reader that finds grid columns by heading; its record (schedule, holds, to-dos, enrollment dates, course history) is stored as one row, and `core/sis.ts` turns it into GPAs and class meetings.
 
 **`packages/syllabus-parser`**: text extraction (PDF lines rebuilt from positions, DOCX, TXT) and rule-based readers for weights, dated items, letter scale, credits, class times, contact and late policy.
 

@@ -8,3 +8,6 @@ export * from "./time.js";
 export * from "./merge.js";
 export * from "./html.js";
 export * from "./api.js";
+export * from "./materials.js";
+export * from "./sis.js";
+export * from "./letters.js";

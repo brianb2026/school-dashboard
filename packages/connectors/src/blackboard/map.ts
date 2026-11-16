@@ -1,14 +1,17 @@
 /**
  * Pure mapping from Blackboard Learn REST JSON to the dashboard's model.
  * No network here, so every rule can be tested against recorded shapes.
- * Field names follow the public API docs (developer.anthology.com).
+ * Field names follow the public API docs (developer.anthology.com); the
+ * Ultra-specific shapes (documents with embedded files, LTI links) were
+ * checked against a real Learn Ultra site.
  */
 import {
   courseKey,
+  decodeEntities,
   htmlToText,
   type Announcement,
   type Assignment,
-  type AttendanceSummary,
+  type ContentItem,
   type Course,
   type CourseFile,
   type CourseOverall,
@@ -58,6 +61,7 @@ export interface BbColumn {
   id: string;
   name?: string;
   displayName?: string;
+  contentId?: string;
   score?: { possible?: number };
   grading?: { type?: string; due?: string };
   gradebookCategoryId?: string;
@@ -101,7 +105,8 @@ export interface BbContent {
   description?: string;
   modified?: string;
   availability?: { available?: string };
-  contentHandler?: { id?: string; file?: { fileName?: string } };
+  contentHandler?: { id?: string; url?: string; file?: { fileName?: string }; customParameters?: Record<string, string> };
+  links?: { href?: string; rel?: string }[];
 }
 export interface BbAttachment {
   id: string;
@@ -111,9 +116,6 @@ export interface BbAttachment {
 export interface BbCourseUser {
   courseRoleId?: string;
   user?: BbUser;
-}
-export interface BbAttendanceRecord {
-  status?: string;
 }
 
 const DAY = 86_400_000;
@@ -137,8 +139,23 @@ function cleanName(course: BbCourse, code: string): string {
   const raw = (course.name ?? course.courseId ?? code).trim();
   const [letters, num] = code.split(" ");
   const lead = new RegExp(`^\\(?${letters}[\\s\\-_.]?${num ?? ""}\\)?(?:[\\s.\\-_]*\\d{1,3})?\\s*[:\\-–—|]*\\s*`, "i");
-  const out = raw.replace(lead, "").replace(/\s*\((?:fall|spring|summer|winter)[^)]*\)\s*$/i, "").trim();
+  const out = raw
+    .replace(lead, "")
+    // "Linear Algebra (MATH235.01.FALL2026STATEU)": the registrar's id in brackets is noise.
+    .replace(/\s*\([A-Za-z]{2,5}[\s\-_.]?\d{2,4}[A-Za-z]?[.\-_ ][^)]*\)\s*$/, "")
+    .replace(/\s*\((?:fall|spring|summer|winter)[^)]*\)\s*$/i, "")
+    .trim();
   return out || raw;
+}
+
+/** "FALL2026STATEU", "2027SP" → "Fall 2026", "Spring 2027". Anything else is left alone. */
+export function prettyTerm(name: string | undefined): string | undefined {
+  if (!name) return undefined;
+  const m = /(fall|spring|summer|winter)\s*[-_ ]?\s*(20\d\d)/i.exec(name) ?? /(20\d\d)\s*[-_ ]?\s*(fall|spring|summer|winter)/i.exec(name);
+  if (!m) return name;
+  const season = (/^\d/.test(m[1]!) ? m[2]! : m[1]!).toLowerCase();
+  const year = /^\d/.test(m[1]!) ? m[1]! : m[2]!;
+  return `${season[0]!.toUpperCase()}${season.slice(1)} ${year}`;
 }
 
 /** Is this enrollment for a class happening now (not last year's, not a club page)? */
@@ -172,11 +189,12 @@ export interface CourseMapContext {
 
 /** An existing course this Blackboard course belongs to: linked before, or added by hand with the same code. */
 export function existingCourse(bb: BbCourse, code: string, known: Course[]): Course | undefined {
-  const linked = known.find((c) => c.sources.some((s) => s.source.startsWith("blackboard-") && s.source !== "blackboard-ical" && s.externalId === bb.id));
+  const isBb = (s: SourceRef) => s.source === "blackboard-session" || s.source === "blackboard-rest";
+  const linked = known.find((c) => c.sources.some((s) => isBb(s) && s.externalId === bb.id));
   if (linked) return linked;
   const key = courseKey(code);
   if (!key) return undefined;
-  return known.find((c) => courseKey(c.code) === key && !c.sources.some((s) => (s.source === "blackboard-session" || s.source === "blackboard-rest") && s.externalId));
+  return known.find((c) => courseKey(c.code) === key && !c.sources.some((s) => isBb(s) && s.externalId));
 }
 
 export function mapCourse(bb: BbCourse, term: BbTerm | undefined, ctx: CourseMapContext): Course {
@@ -190,7 +208,7 @@ export function mapCourse(bb: BbCourse, term: BbTerm | undefined, ctx: CourseMap
     id: prev?.id ?? `bb:${bb.id}`,
     code,
     name: cleanName(bb, code),
-    term: term?.name ?? prev?.term ?? ctx.termName,
+    term: prettyTerm(term?.name) ?? prev?.term ?? ctx.termName,
     credits: prev?.credits ?? 3,
     level: prev?.level ?? "regular",
     color,
@@ -200,8 +218,6 @@ export function mapCourse(bb: BbCourse, term: BbTerm | undefined, ctx: CourseMap
     sources: [{ source: ctx.source, externalId: bb.id, url, fetchedAt: ctx.now.toISOString() }],
   };
 }
-
-export const ATTENDANCE_COLUMN = /\b(qwickly|attendance)\b/i;
 
 function totalKind(name: string): CourseOverall["kind"] | undefined {
   if (/weighted\s*total/i.test(name)) return "weighted-total";
@@ -219,6 +235,51 @@ function numeric(g: BbGrade | undefined, col: BbColumn): { score: number; possib
   return { score, possible };
 }
 
+// ---------- course content: where things are, what they link to ----------
+
+export interface ContentIndex {
+  byId: Map<string, BbContent>;
+  /** Address of one content item in the Blackboard site. */
+  urlOf(contentId: string | undefined): string | undefined;
+  /** "gradescope:1234567" when the item is a link to that Gradescope assignment. */
+  refsOf(contentId: string | undefined): string[];
+}
+
+export function indexContents(contents: BbContent[], baseUrl: string, bbCourseId: string): ContentIndex {
+  const byId = new Map(contents.map((c) => [c.id, c]));
+  return {
+    byId,
+    urlOf(id) {
+      const c = id ? byId.get(id) : undefined;
+      if (!c) return undefined;
+      const q = new URLSearchParams({ redirectType: "nautilus", courseId: bbCourseId, contentId: c.id });
+      if (c.parentId) q.set("parentId", c.parentId);
+      return `${baseUrl}/ultra/redirect?${q.toString()}`;
+    },
+    refsOf(id) {
+      const gs = /^assignment-(\d+)$/.exec((id ? byId.get(id) : undefined)?.contentHandler?.customParameters?.custom_gradescope_resource_id ?? "");
+      return gs ? [`gradescope:${gs[1]}`] : [];
+    },
+  };
+}
+
+/**
+ * Links that open Gradescope straight from Blackboard (an assignment that
+ * "is a link to a Gradescope assignment"). Opening one with your Blackboard
+ * sign-in lands in your Gradescope account with no second login.
+ */
+export function gradescopeLaunchPaths(contents: BbContent[], bbCourseId: string): string[] {
+  return contents
+    .filter((c) => c.availability?.available !== "No" && c.contentHandler?.id === "resource/x-bb-blti-link")
+    .filter(
+      (c) =>
+        /gradescope|gs-proxy/i.test(c.contentHandler?.url ?? "") ||
+        Boolean(c.contentHandler?.customParameters?.custom_gradescope_resource_id) ||
+        /gradescope/i.test(c.description ?? ""),
+    )
+    .map((c) => `/webapps/blackboard/execute/blti/launchLink?course_id=${encodeURIComponent(bbCourseId)}&content_id=${encodeURIComponent(c.id)}`);
+}
+
 export interface GradebookInput {
   /** Dashboard course id. */
   courseId: string;
@@ -228,6 +289,7 @@ export interface GradebookInput {
   columns: BbColumn[];
   grades: BbGrade[];
   categories: BbCategory[];
+  contents?: ContentIndex;
   now: Date;
 }
 
@@ -235,13 +297,12 @@ export interface GradebookOutput {
   assignments: Assignment[];
   grades: GradeEntry[];
   overall: CourseOverall[];
-  attendance?: AttendanceSummary;
 }
 
-/** Gradebook columns + your grades → assignments, grade entries, the course total, attendance. */
+/** Gradebook columns + your grades → assignments, grade entries, the course total. */
 export function mapGradebook(i: GradebookInput): GradebookOutput {
   const fetchedAt = i.now.toISOString();
-  const url = `${i.baseUrl}/ultra/courses/${encodeURIComponent(i.bbCourseId)}/grades`;
+  const gradesUrl = `${i.baseUrl}/ultra/courses/${encodeURIComponent(i.bbCourseId)}/grades`;
   const byCol = new Map(i.grades.map((g) => [g.columnId, g]));
   const cats = new Map(i.categories.map((c) => [c.id, c.title]));
   const out: GradebookOutput = { assignments: [], grades: [], overall: [] };
@@ -250,6 +311,7 @@ export function mapGradebook(i: GradebookInput): GradebookOutput {
     const name = (col.displayName || col.name || "").trim();
     if (!name || col.availability?.available === "No") continue;
     const g = byCol.get(col.id);
+    const url = i.contents?.urlOf(col.contentId) ?? gradesUrl;
     const ref: SourceRef = { source: i.source, externalId: col.id, url, fetchedAt };
     const kind = totalKind(name);
     const calculated = col.grading?.type === "Calculated";
@@ -279,6 +341,7 @@ export function mapGradebook(i: GradebookInput): GradebookOutput {
             ? "missing"
             : "upcoming";
     const id = `bb:${i.bbCourseId}:${col.id}`;
+    const refs = i.contents?.refsOf(col.contentId) ?? [];
     out.assignments.push({
       id,
       courseId: i.courseId,
@@ -291,6 +354,8 @@ export function mapGradebook(i: GradebookInput): GradebookOutput {
       submittable: false,
       countsTowardGrade: col.includeInCalculations === false ? false : undefined,
       url,
+      externalRefs: refs.length ? refs : undefined,
+      contentId: col.contentId,
       attachments: [],
       sources: [ref],
     });
@@ -304,14 +369,6 @@ export function mapGradebook(i: GradebookInput): GradebookOutput {
         gradedAt: g?.lastRelevantDate,
         source: ref,
       });
-    }
-    if (ATTENDANCE_COLUMN.test(name) && n) {
-      out.attendance = {
-        courseId: i.courseId,
-        percent: (n.score / n.possible) * 100,
-        label: `${name}: ${n.score} of ${n.possible}`,
-        source: { ...ref, source: /qwickly/i.test(name) ? "qwickly" : i.source },
-      };
     }
   }
   return out;
@@ -327,7 +384,7 @@ export function mapLetterScale(schemas: BbSchema[]): LetterCutoff[] | undefined 
   const cut = letterish(pick)
     .map((x) => ({ letter: x.text!.trim(), min: x.lowerBound! }))
     .sort((a, b) => b.min - a.min);
-  cut[cut.length - 1]!.min = Math.min(cut[cut.length - 1]!.min, 0) || 0;
+  cut[cut.length - 1]!.min = 0;
   return cut;
 }
 
@@ -361,29 +418,31 @@ export function mapInstructors(users: BbCourseUser[]): Person[] {
     }));
 }
 
-export function mapAttendance(records: BbAttendanceRecord[], courseId: string, source: BbSource, now: Date): AttendanceSummary | undefined {
-  if (!records.length) return undefined;
-  const count = (s: string) => records.filter((r) => (r.status ?? "").toLowerCase() === s).length;
-  const present = count("present");
-  const late = count("late");
-  const absent = count("absent");
-  const excused = count("excused");
-  const counted = present + late + absent;
-  return {
-    courseId,
-    present,
-    late,
-    absent,
-    excused,
-    total: records.length,
-    percent: counted > 0 ? ((present + late) / counted) * 100 : undefined,
-    label: `${present + late} of ${counted} classes`,
-    source: { source, fetchedAt: now.toISOString() },
-  };
-}
+// ---------- files ----------
 
 const SYLLABUS = /syllab/i;
+/** Pages worth reading for dates even though they aren't "the syllabus". */
+const SCHEDULE = /syllab|schedule|calendar/i;
 const READABLE = /\.(pdf|docx|txt|md)$/i;
+const MIME: Record<string, string> = {
+  pdf: "application/pdf",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ppt: "application/vnd.ms-powerpoint",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  txt: "text/plain",
+  md: "text/plain",
+  zip: "application/zip",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+};
+
+function mimeOf(name: string, given?: string): string | undefined {
+  return given || MIME[name.toLowerCase().split(".").pop() ?? ""];
+}
 
 export function folderTrail(item: BbContent, byId: Map<string, BbContent>): string[] {
   const trail: string[] = [];
@@ -395,17 +454,6 @@ export function folderTrail(item: BbContent, byId: Map<string, BbContent>): stri
   return trail;
 }
 
-/** Which content items are worth asking for their attachments (one request each, so be picky). */
-export function attachmentCandidates(contents: BbContent[], limit: number): BbContent[] {
-  const score = (c: BbContent) => (SYLLABUS.test(c.title ?? "") ? 0 : c.contentHandler?.id === "resource/x-bb-file" ? 1 : 2);
-  return contents
-    .filter((c) => c.availability?.available !== "No")
-    .filter((c) => c.contentHandler?.id === "resource/x-bb-file" || c.contentHandler?.id === "resource/x-bb-document" || SYLLABUS.test(c.title ?? ""))
-    .filter((c) => c.contentHandler?.id !== "resource/x-bb-folder")
-    .sort((a, b) => score(a) - score(b))
-    .slice(0, limit);
-}
-
 export interface FileMapContext {
   courseId: string;
   bbCourseId: string;
@@ -413,39 +461,184 @@ export interface FileMapContext {
   now: Date;
 }
 
-export function mapAttachment(content: BbContent, att: BbAttachment, byId: Map<string, BbContent>, ctx: FileMapContext): CourseFile {
-  const name = att.fileName || content.contentHandler?.file?.fileName || content.title || "file";
-  const cid = encodeURIComponent(ctx.bbCourseId);
-  return {
-    id: `bbfile:${ctx.bbCourseId}:${content.id}:${att.id}`,
-    courseId: ctx.courseId,
-    name,
-    folder: folderTrail(content, byId),
-    mimeType: att.mimeType,
-    url: `/learn/api/public/v1/courses/${cid}/contents/${encodeURIComponent(content.id)}/attachments/${encodeURIComponent(att.id)}/download`,
-    isSyllabus: (SYLLABUS.test(name) || SYLLABUS.test(content.title ?? "")) && READABLE.test(name),
-    modified: content.modified,
-    source: { source: ctx.source, externalId: att.id, fetchedAt: ctx.now.toISOString() },
-  };
+/** Files embedded in an Ultra document: `<a data-bbfile="{…}" href="…/bbcswebdav/…/xid-123_1?…">`. */
+export function embeddedFiles(html: string): { xid: string; name: string; mimeType?: string }[] {
+  const out: { xid: string; name: string; mimeType?: string }[] = [];
+  for (const m of html.matchAll(/<a\b[^>]*\bdata-bbfile="([^"]*)"[^>]*>/gi)) {
+    const tag = m[0];
+    if (/data-bbtype="image"/i.test(tag)) continue;
+    let meta: { linkName?: string; displayName?: string; mimeType?: string } = {};
+    try {
+      meta = JSON.parse(decodeEntities(m[1]!)) as typeof meta;
+    } catch {
+      continue;
+    }
+    const name = (meta.displayName || meta.linkName || "").trim();
+    const xid = /\/xid-(\d+_\d+)/.exec(decodeEntities(/\bhref="([^"]*)"/i.exec(tag)?.[1] ?? ""))?.[1];
+    if (!name || !xid || /^image\//i.test(meta.mimeType ?? "")) continue;
+    out.push({ xid, name, mimeType: meta.mimeType });
+  }
+  return out;
 }
 
 /**
- * A syllabus typed straight into a Blackboard page (no file): treated as a
- * text file whose "download" is the page body.
+ * Every file a course offers, read from the content list alone (no extra
+ * requests): plain file items, and files embedded in documents — which is
+ * where Ultra courses keep the syllabus ("Course Overview → Syllabus").
  */
-export function mapInlineSyllabus(content: BbContent, byId: Map<string, BbContent>, ctx: FileMapContext): CourseFile | undefined {
-  if (!SYLLABUS.test(content.title ?? "")) return undefined;
-  const text = htmlToText(content.body ?? content.description ?? "");
-  if (text.length < 400) return undefined;
-  return {
-    id: `bbfile:${ctx.bbCourseId}:${content.id}:body`,
-    courseId: ctx.courseId,
-    name: `${htmlToText(content.title ?? "Syllabus").slice(0, 60)}.txt`,
-    folder: folderTrail(content, byId),
-    mimeType: "text/plain",
-    url: `/learn/api/public/v1/courses/${encodeURIComponent(ctx.bbCourseId)}/contents/${encodeURIComponent(content.id)}`,
-    isSyllabus: true,
-    modified: content.modified,
-    source: { source: ctx.source, externalId: content.id, fetchedAt: ctx.now.toISOString() },
+export function mapContentFiles(contents: BbContent[], ctx: FileMapContext): CourseFile[] {
+  const byId = new Map(contents.map((c) => [c.id, c]));
+  const cid = encodeURIComponent(ctx.bbCourseId);
+  const fetchedAt = ctx.now.toISOString();
+  const files: CourseFile[] = [];
+  const seen = new Set<string>();
+  const push = (f: CourseFile) => {
+    if (seen.has(f.id)) return;
+    seen.add(f.id);
+    files.push(f);
   };
+
+  for (const c of contents) {
+    if (c.availability?.available === "No") continue;
+    const folder = folderTrail(c, byId);
+    const inSyllabusPlace = folder.some((seg) => SYLLABUS.test(seg)) || SYLLABUS.test(c.title ?? "");
+    const base = `/learn/api/public/v1/courses/${cid}/contents/${encodeURIComponent(c.id)}`;
+
+    if (c.contentHandler?.id === "resource/x-bb-file") {
+      const name = c.contentHandler.file?.fileName || c.title || "file";
+      push({
+        id: `bbfile:${ctx.bbCourseId}:${c.id}:file`,
+        courseId: ctx.courseId,
+        name,
+        folder,
+        mimeType: mimeOf(name),
+        url: `${base}/attachments`,
+        isSyllabus: READABLE.test(name) && (SYLLABUS.test(name) || inSyllabusPlace),
+        modified: c.modified,
+        contentId: c.id,
+        source: { source: ctx.source, externalId: c.id, fetchedAt },
+      });
+    }
+
+    const body = c.body ?? "";
+    for (const e of embeddedFiles(body)) {
+      push({
+        id: `bbfile:${ctx.bbCourseId}:${c.id}:x${e.xid}`,
+        courseId: ctx.courseId,
+        name: e.name,
+        folder,
+        mimeType: mimeOf(e.name, e.mimeType),
+        url: `${base}#xid-${e.xid}`,
+        isSyllabus: READABLE.test(e.name) && (SYLLABUS.test(e.name) || inSyllabusPlace),
+        modified: c.modified,
+        contentId: c.id,
+        source: { source: ctx.source, externalId: e.xid, fetchedAt },
+      });
+    }
+
+    // A syllabus or schedule typed straight into a page: its text is the "file".
+    const label = c.title && c.title !== "ultraDocumentBody" ? c.title : (byId.get(c.parentId ?? "")?.title ?? c.title ?? "");
+    if (body && SCHEDULE.test(`${label} ${folder[folder.length - 1] ?? ""}`)) {
+      // Count only what was typed: a page that just holds the syllabus file is not itself a syllabus.
+      const text = htmlToText(body.replace(/<a\b[^>]*\bdata-bbfile=[^>]*>[\s\S]*?<\/a>/gi, " "));
+      if (text.length >= 200) {
+        push({
+          id: `bbfile:${ctx.bbCourseId}:${c.id}:body`,
+          courseId: ctx.courseId,
+          name: `${htmlToText(label).slice(0, 60) || "Syllabus"}.txt`,
+          folder,
+          mimeType: "text/plain",
+          url: base,
+          isSyllabus: true,
+          modified: c.modified,
+          contentId: c.id,
+          source: { source: ctx.source, externalId: c.id, fetchedAt },
+        });
+      }
+    }
+  }
+  return files;
+}
+
+// ---------- the course page itself ----------
+
+const KIND_BY_HANDLER: Record<string, ContentItem["kind"]> = {
+  "resource/x-bb-folder": "folder",
+  "resource/x-bb-lesson": "folder",
+  "resource/x-bb-module-page": "folder",
+  "resource/x-bb-document": "page",
+  "resource/x-bb-blankpage": "page",
+  "resource/x-bb-file": "file",
+  "resource/x-bb-externallink": "link",
+  "resource/x-bb-assignment": "assignment",
+  "resource/x-bb-asmt-test-link": "test",
+  "resource/x-bb-asmt-survey-link": "test",
+  "resource/x-bb-blti-link": "tool",
+  "resource/x-bb-forumlink": "discussion",
+  "resource/x-bb-discussion": "discussion",
+};
+
+/** The tool behind an LTI link, by its address or title. */
+const TOOLS: [RegExp, string][] = [
+  [/gradescope|gs-proxy/i, "Gradescope"],
+  [/qwickly/i, "Qwickly"],
+  [/panopto/i, "Panopto"],
+  [/zoom/i, "Zoom"],
+  [/webwork/i, "WeBWorK"],
+  [/mheducation|mcgraw|connect\.mheducation/i, "McGraw Hill"],
+  [/pearson|mylab|mastering/i, "Pearson"],
+  [/cengage|webassign/i, "Cengage"],
+  [/perusall/i, "Perusall"],
+  [/piazza/i, "Piazza"],
+  [/top ?hat/i, "Top Hat"],
+  [/collaborate/i, "Class Collaborate"],
+];
+
+/**
+ * The course content as Blackboard shows it: folders, pages, files, links,
+ * assignments, tests and tools (Gradescope, Qwickly attendance, …), in
+ * Blackboard's order. Ultra keeps a page's text in a hidden child named
+ * "ultraDocumentBody"; that child is folded into its page. Items you can't
+ * see in Blackboard (not available) are left out.
+ */
+export function mapContentTree(contents: BbContent[], baseUrl: string, bbCourseId: string): ContentItem[] {
+  const shown = contents.filter((c) => c.availability?.available !== "No");
+  const byId = new Map(shown.map((c) => [c.id, c]));
+  const index = indexContents(shown, baseUrl, bbCourseId);
+  const isBody = (c: BbContent) => /^ultraDocumentBody$/i.test(c.title ?? "");
+  const bodiesOf = new Map<string, BbContent[]>();
+  for (const c of shown) if (isBody(c) && c.parentId) bodiesOf.set(c.parentId, [...(bodiesOf.get(c.parentId) ?? []), c]);
+  const hasRealChildren = new Set(shown.filter((c) => !isBody(c) && c.parentId).map((c) => c.parentId!));
+
+  const out: ContentItem[] = [];
+  for (const c of shown) {
+    if (isBody(c)) continue;
+    // A child of something we left out moves up to the nearest shown folder (or the top).
+    let parentId = c.parentId;
+    while (parentId && !byId.has(parentId)) parentId = undefined;
+    const handler = c.contentHandler?.id ?? "";
+    let kind: ContentItem["kind"] = KIND_BY_HANDLER[handler] ?? "other";
+    const bodies = bodiesOf.get(c.id) ?? [];
+    // An Ultra "document" is stored as a folder holding only its body: it's a page.
+    if (kind === "folder" && bodies.length > 0 && !hasRealChildren.has(c.id)) kind = "page";
+    const html = [c.body ?? "", ...bodies.map((b) => b.body ?? "")].join(" ");
+    const text = htmlToText(html.replace(/<a\b[^>]*\bdata-bbfile=[^>]*>[\s\S]*?<\/a>/gi, " ")).replace(/\s+/g, " ").trim();
+    const linkUrl = c.contentHandler?.url;
+    const href = kind === "link" && linkUrl && /^https?:\/\//i.test(linkUrl) ? linkUrl : undefined;
+    const toolText = `${linkUrl ?? ""} ${c.title ?? ""} ${c.description ?? ""} ${Object.keys(c.contentHandler?.customParameters ?? {}).join(" ")}`;
+    const tool = kind === "tool" ? TOOLS.find(([re]) => re.test(toolText))?.[1] : undefined;
+    out.push({
+      id: c.id,
+      ...(parentId ? { parentId } : {}),
+      title: htmlToText(c.title ?? "") || (kind === "page" ? "Page" : "Untitled"),
+      kind,
+      url: index.urlOf(c.id),
+      ...(href ? { href } : {}),
+      ...(text ? { text: text.slice(0, 600) } : {}),
+      ...(tool ? { tool } : {}),
+      ...(bodies.length ? { bodyIds: bodies.map((b) => b.id) } : {}),
+      ...(c.modified ? { modified: c.modified } : {}),
+    });
+  }
+  return out;
 }

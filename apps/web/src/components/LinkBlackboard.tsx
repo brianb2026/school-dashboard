@@ -53,7 +53,7 @@ export function LinkBlackboard({ compact }: { compact?: boolean }) {
 export function LinkProgress({ status, onClose }: { status: LinkStatus; onClose: () => void }) {
   if (status.phase === "idle" || status.phase === "done") return null;
   const active = status.phase === "opening" || status.phase === "waiting" || status.phase === "syncing";
-  const name = status.target === "gradescope" ? "Gradescope" : "Blackboard";
+  const name = { gradescope: "Gradescope", canvas: "Canvas", sis: "SIS", blackboard: "Blackboard" }[status.target ?? "blackboard"];
   return (
     <div className={`notice ${active ? "" : "warn"} link-progress`} role="status">
       {active && <span className="spinner" aria-hidden />}

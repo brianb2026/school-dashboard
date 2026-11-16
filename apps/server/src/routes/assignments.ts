@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { zonedToIso, type Assignment, type AssignmentPatch, type AttendanceMark, type NewAssignment } from "@sd/core";
+import { zonedToIso, type Assignment, type AssignmentPatch, type NewAssignment } from "@sd/core";
 import type { AppContext } from "../app.js";
-import { deleteAssignment, deleteAttendance, deleteGrade, getAssignment, getCourse, setOverride, upsertAssignment, upsertAttendance, upsertGrade } from "../db/client.js";
+import { deleteAssignment, deleteGrade, getAssignment, getCourse, setOverride, upsertAssignment, upsertGrade } from "../db/client.js";
 
 const KINDS = new Set(["homework", "quiz", "exam", "project", "paper", "lab", "discussion", "reading", "other"]);
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
-const MARKS = new Set(["present", "late", "absent", "excused"]);
 
 export function assignmentRoutes(app: FastifyInstance, ctx: AppContext): void {
   const { db, cfg } = ctx;
@@ -39,7 +38,7 @@ export function assignmentRoutes(app: FastifyInstance, ctx: AppContext): void {
     return a;
   });
 
-  /** Your own marks on any assignment: done, effort, grading category, hidden. Kept across syncs. */
+  /** Your own marks on any assignment: done, effort, grading category, hidden, which score to trust. Kept across syncs. */
   app.patch<{ Params: { id: string }; Body: AssignmentPatch }>("/api/assignments/:id", async (req, reply) => {
     if (!getAssignment(db, req.params.id)) return reply.code(404).send({ error: "No such assignment." });
     const b = req.body ?? {};
@@ -61,6 +60,10 @@ export function assignmentRoutes(app: FastifyInstance, ctx: AppContext): void {
     if (b.category !== undefined) {
       if (b.category !== null && (typeof b.category !== "string" || !b.category.trim() || b.category.length > 80)) return reply.code(400).send({ error: "Bad category." });
       patch.category = b.category === null ? null : b.category.trim();
+    }
+    if (b.gradeFrom !== undefined) {
+      if (b.gradeFrom !== null && b.gradeFrom !== "blackboard" && b.gradeFrom !== "gradescope") return reply.code(400).send({ error: "Bad value." });
+      patch.gradeFrom = b.gradeFrom;
     }
     return setOverride(db, req.params.id, patch);
   });
@@ -95,21 +98,6 @@ export function assignmentRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.delete<{ Params: { id: string } }>("/api/grades/:id", async (req) => {
     deleteGrade(db, req.params.id, "manual");
-    return { ok: true };
-  });
-
-  /** One-tap check-in log, for classes whose attendance isn't in Blackboard. */
-  app.post<{ Body: Partial<AttendanceMark> }>("/api/attendance", async (req, reply) => {
-    const b = req.body ?? {};
-    if (!b.courseId || !getCourse(db, b.courseId)) return reply.code(400).send({ error: "Pick one of your courses." });
-    if (!DATE.test(b.date ?? "") || Number.isNaN(Date.parse(b.date!))) return reply.code(400).send({ error: "Pick a date." });
-    if (!MARKS.has(b.status ?? "")) return reply.code(400).send({ error: "Pick present, late, absent or excused." });
-    upsertAttendance(db, { courseId: b.courseId, date: b.date!, status: b.status!, source: { source: "manual", fetchedAt: new Date().toISOString() } });
-    return { ok: true };
-  });
-
-  app.delete<{ Querystring: { courseId?: string; date?: string } }>("/api/attendance", async (req) => {
-    deleteAttendance(db, String(req.query.courseId ?? ""), String(req.query.date ?? ""), "manual");
     return { ok: true };
   });
 }

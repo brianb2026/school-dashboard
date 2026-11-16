@@ -6,9 +6,6 @@ import type {
   Announcement,
   Assignment,
   AssignmentKind,
-  AttendanceRecord,
-  AttendanceStatus,
-  AttendanceSummary,
   Course,
   CourseFile,
   CourseLevel,
@@ -21,6 +18,12 @@ import type {
   Message,
 } from "./types.js";
 
+/**
+ * Bumped whenever the server's answers change shape. The page compares it
+ * with the running server's, so an old server behind a new page is caught.
+ */
+export const API_VERSION = 6;
+
 /** An assignment as the UI shows it: merged across sources, with its grade and your marks. */
 export interface AssignmentView extends Assignment {
   score?: number;
@@ -28,6 +31,19 @@ export interface AssignmentView extends Assignment {
   gradedAt?: string;
   /** The score is one you typed in, not one a source reported. */
   scoreIsYours?: boolean;
+  /** Where the shown score comes from: "Blackboard", "Gradescope" or "You". */
+  scoreFrom?: string;
+  /**
+   * Every score on record for this item. More than one entry with different
+   * numbers means the sources disagree (e.g. a regrade in Gradescope that
+   * Blackboard hasn't picked up); the UI shows both and lets you choose.
+   */
+  scores?: { from: "Blackboard" | "Canvas" | "Gradescope" | "You"; score: number; possible: number }[];
+  scoresDiffer?: boolean;
+  /** Course files that go with this item (handout, the reading itself). */
+  materials?: { id: string; name: string }[];
+  /** The due date it had before the school moved it (in the last week). */
+  movedFrom?: string;
   /** Submitted, graded, excused, or ticked off by you. */
   done: boolean;
   /** You ticked it off yourself. */
@@ -49,7 +65,8 @@ export interface CourseView extends Course {
   /** Letter scale in effect for this course. */
   cutoffs: LetterCutoff[];
   cutoffsFrom: "blackboard" | "syllabus" | "manual" | "school";
-  attendance?: AttendanceSummary;
+  /** Letters the source didn't give, filled in from the usual scale (its own are guarantees). */
+  cutoffsFilled?: string[];
   /** none = no syllabus yet; review = found but needs your check; applied = weights in use. */
   syllabus: "none" | "review" | "applied";
 }
@@ -61,7 +78,7 @@ export interface WorkloadDay {
   conflict: boolean;
 }
 
-export type ViewName = "Today" | "Assignments" | "Grades" | "Inbox" | "Schedule" | "Attendance" | "Files" | "Syllabi" | "Settings";
+export type ViewName = "Home" | "Grades" | "Inbox" | "Files" | "Syllabi" | "Settings";
 
 /** One line telling you something needs you, with where to go. */
 export interface Notice {
@@ -69,7 +86,7 @@ export interface Notice {
   level: "info" | "warn";
   text: string;
   view?: ViewName;
-  action?: "link-blackboard" | "link-gradescope";
+  action?: "link-blackboard" | "link-gradescope" | "link-canvas" | "link-sis" | "open-sis";
 }
 
 export interface LinkInfo {
@@ -79,7 +96,7 @@ export interface LinkInfo {
   host?: string;
 }
 
-export type LinkTarget = "blackboard" | "gradescope";
+export type LinkTarget = "blackboard" | "gradescope" | "canvas" | "sis";
 export type LinkPhase = "idle" | "opening" | "waiting" | "syncing" | "done" | "error" | "cancelled";
 
 export interface LinkStatus {
@@ -91,6 +108,12 @@ export interface LinkStatus {
 export interface DashboardData {
   /** False until any course or assignment exists. */
   hasData: boolean;
+  /** Your first name, as Blackboard or Canvas has it. */
+  studentName?: string;
+  /** The official record from the student information system, when linked. */
+  sis?: SisView;
+  /** What changed in the last two weeks, newest first (seen ones included, marked). */
+  changes: ChangeView[];
   school: string;
   term: { name: string; start: string; end: string };
   timezone: string;
@@ -107,14 +130,16 @@ export interface DashboardData {
   announcements: Announcement[];
   messages: Message[];
   files: CourseFile[];
-  attendance: AttendanceRecord[];
   notices: Notice[];
   unmatchedCount: number;
   lastSyncAt?: string;
   syncing: boolean;
   links: {
     blackboard: LinkInfo & { via?: "session" | "api" };
-    gradescope: LinkInfo;
+    /** `viaBlackboard`: it can be opened through a Blackboard link, with no separate sign-in. */
+    gradescope: LinkInfo & { viaBlackboard: boolean };
+    canvas: LinkInfo & { via?: "session" | "token" };
+    sis: LinkInfo & { home?: string };
     gmail: { connected: boolean; configured: boolean };
     calendar: { set: boolean };
   };
@@ -122,7 +147,75 @@ export interface DashboardData {
   notifications: boolean;
 }
 
-export type ToggleKey = "blackboardSessionReader" | "gradescopeSessionReader";
+/** One thing that changed since you last looked. */
+export interface ChangeView {
+  id: number;
+  at: string;
+  kind: "grade" | "due-moved" | "new-assignment" | "file" | "announcement";
+  courseId?: string;
+  /** What it's about: an assignment, a file, an announcement. */
+  title: string;
+  assignmentId?: string;
+  fileId?: string;
+  announcementId?: string;
+  from?: string;
+  to?: string;
+  score?: number;
+  possible?: number;
+  was?: number;
+  seen: boolean;
+}
+
+/** The SIS record as the dashboard shows it, with GPAs worked out from official grades. */
+export interface SisView {
+  /** Cumulative GPA from every graded course on the record. */
+  gpa?: number;
+  /** Units that count toward it. */
+  units: number;
+  terms: { term: string; gpa?: number; units: number; courses: { code: string; title: string; units?: number; grade?: string; status?: string }[] }[];
+  holds: { title: string }[];
+  todos: { title: string }[];
+  enrollment: { term?: string; at?: string; text: string }[];
+  fetchedAt: string;
+}
+
+/** A person's (or school's) own space on this Mac: data, sign-ins and settings apart from the others. */
+export interface ProfileInfo {
+  id: string;
+  name?: string;
+  host?: string;
+  lms?: "blackboard" | "canvas";
+  active: boolean;
+}
+
+/** What the sign-in screen shows before anything else loads. */
+export interface SessionInfo {
+  /** Your first name, once known. */
+  name?: string;
+  school: string;
+  /** A learning system (Blackboard or Canvas) is linked (a saved sign-in exists). */
+  linked: boolean;
+  host?: string;
+  /** Which one. */
+  lms?: "blackboard" | "canvas";
+  /** The SIS is linked too. */
+  sis?: boolean;
+  /** Classes are saved on this Mac, so they can be opened without signing in. */
+  hasData: boolean;
+}
+
+/**
+ * "Continue": what happened to your saved sign-in.
+ *  in     = it still works (or was renewed quietly); a fresh sync has started.
+ *  window = it ran out; the school's sign-in window is open (follow /api/link/status).
+ *  link   = nothing saved yet; link Blackboard first.
+ *  error  = something stopped it; `message` says what.
+ */
+export interface SignInResult {
+  state: "in" | "window" | "link" | "error";
+  name?: string;
+  message?: string;
+}
 
 export interface SettingsInfo {
   calendarLink: { set: boolean; host?: string; fromEnv: boolean };
@@ -133,6 +226,9 @@ export interface SettingsInfo {
   gpaScale: string;
   notifications: boolean;
   chromeFound: boolean;
+  /** Running as the demo: only the pretend Blackboard can be linked. */
+  demo: boolean;
+  gmailRedirectUri: string;
 }
 
 export interface ConnectorInfo {
@@ -189,7 +285,7 @@ export interface SyllabusRecord {
   parse: {
     course: { code?: string; title?: string };
     weights: { weights: { name: string; weight: number; line: string }[]; total: number; confident: boolean };
-    dates: { date: string; title: string; kind: AssignmentKind; line: string }[];
+    dates: { date: string; time?: string; title: string; kind: AssignmentKind; line: string; url?: string }[];
     policies: { instructorEmails: string[]; officeHours?: string; latePolicy?: string };
     letterScale?: LetterCutoff[];
     credits?: number;
@@ -203,7 +299,7 @@ export interface ConfirmSyllabus {
   courseId?: string;
   newCourse?: NewCourse;
   weights: { name: string; weight: number; dropLowest?: number }[];
-  items: { date: string; time?: string; title: string; kind: AssignmentKind }[];
+  items: { date: string; time?: string; title: string; kind: AssignmentKind; url?: string }[];
   instructorEmails: string[];
   officeHours?: string;
   latePolicy?: string;
@@ -215,6 +311,8 @@ export interface AssignmentPatch {
   effortHours?: number | null;
   category?: string | null;
   hidden?: boolean;
+  /** Which source's score to use when Blackboard and Gradescope disagree. */
+  gradeFrom?: "blackboard" | "gradescope" | null;
 }
 
 export interface NewAssignment {
@@ -224,12 +322,6 @@ export interface NewAssignment {
   date: string;
   time?: string;
   pointsPossible?: number;
-}
-
-export interface AttendanceMark {
-  courseId: string;
-  date: string;
-  status: AttendanceStatus;
 }
 
 export interface OutgoingMessage {

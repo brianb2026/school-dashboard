@@ -2,7 +2,7 @@
   "name": "school-dashboard",
   "version": "1.0.0",
   "private": true,
-  "description": "A local-only personal student dashboard: Blackboard, Gradescope, Qwickly, Gmail and syllabi in one place.",
+  "description": "A local-only personal student dashboard: Blackboard, Gradescope, Gmail and syllabi in one place.",
   "type": "module",
   "workspaces": [
     "packages/*",
@@ -19,7 +19,8 @@
     "typecheck": "tsc -p .",
     "test": "vitest run",
     "start": "npm run build && OPEN_BROWSER=1 npm run start --workspace @sd/server",
-    "demo": "npm run build && node --import tsx scripts/demo.ts"
+    "demo": "npm run build && node --import tsx scripts/demo.ts",
+    "menubar": "zsh scripts/build-menubar.sh && open \"apps/menubar/build/Semester Bar.app\""
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

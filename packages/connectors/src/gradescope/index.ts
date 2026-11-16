@@ -39,7 +39,8 @@ export function parseGsCourses(html: string): GsCourse[] {
   const blocks = html.split(/class="courseList--term"/);
   const scope = blocks.length > 1 ? blocks[1]! : html;
   const out: GsCourse[] = [];
-  for (const m of scope.matchAll(/<a[^>]*class="courseBox"[^>]*href="\/courses\/(\d+)"[^>]*>([\s\S]*?)<\/a>/g)) {
+  // Real markup: <a class="courseBox " data-loginrequired="false" href="/courses/123">. The "Add a course" box is a <button>.
+  for (const m of scope.matchAll(/<a\b[^>]*class="courseBox\b[^"]*"[^>]*href="\/courses\/(\d+)"[^>]*>([\s\S]*?)<\/a>/g)) {
     const inner = m[2]!;
     const shortName = text(/class="courseBox--shortname"[^>]*>([\s\S]*?)<\/h3>/.exec(inner)?.[1] ?? "");
     const name = text(/class="courseBox--name"[^>]*>([\s\S]*?)<\/div>/.exec(inner)?.[1] ?? "");
@@ -103,14 +104,26 @@ async function page(ctx: ConnectorContext, jar: CookieJar, path: string): Promis
 
 /** Is this cookie jar signed in to Gradescope? Used while the sign-in window is open. */
 export async function gradescopeWorks(jar: CookieJar, fetchImpl: ConnectorContext["fetch"]): Promise<boolean> {
-  if (jar.size === 0) return false;
+  return (await gradescopeCourseCount(jar, fetchImpl)) > 0;
+}
+
+/**
+ * How many classes this Gradescope session can see: -1 = not signed in,
+ * 0 = signed in to an account with no classes (the wrong account: the one
+ * with your classes is the one Blackboard opens).
+ */
+export async function gradescopeCourseCount(jar: CookieJar, fetchImpl: ConnectorContext["fetch"]): Promise<number> {
+  if (jar.size === 0) return -1;
   try {
     const url = new URL("/account", GRADESCOPE_ORIGIN);
     const res = await fetchImpl(url, { headers: { cookie: jar.header(url), accept: "text/html" }, redirect: "manual", signal: AbortSignal.timeout(10_000) });
-    await res.body?.cancel().catch(() => undefined);
-    return res.status === 200;
+    if (res.status !== 200) {
+      await res.body?.cancel().catch(() => undefined);
+      return -1;
+    }
+    return parseGsCourses(new TextDecoder().decode(await readCapped(res, 4 * 1024 * 1024))).length;
   } catch {
-    return false;
+    return -1;
   }
 }
 
@@ -119,7 +132,7 @@ export const gradescope: Connector = {
   label: "Gradescope",
   capabilities: ["assignments", "grades"],
   async status(ctx) {
-    if (!(await ctx.secrets.get(GRADESCOPE_COOKIES))) return { state: "not-configured", detail: "Not linked (scores often reach Blackboard anyway)" };
+    if (!(await ctx.secrets.get(GRADESCOPE_COOKIES))) return { state: "not-configured", detail: "Not linked yet. It links by itself after Blackboard when your school opens Gradescope from there." };
     if (ctx.env.GRADESCOPE_SESSION_EXPIRED === "true") return { state: "needs-sign-in", detail: "Sign-in expired. Reconnect to keep syncing." };
     return { state: "ready" };
   },
@@ -153,6 +166,8 @@ export const gradescope: Connector = {
           assignments.push({
             id,
             courseId,
+            // The Blackboard column that links here carries the same number, so the two merge exactly.
+            externalRefs: /^\d+$/.test(r.id) ? [`gradescope:${r.id}`] : undefined,
             title: r.title,
             kind: guessKind(r.title),
             dueAt: r.dueAt,
@@ -168,7 +183,7 @@ export const gradescope: Connector = {
       }
       notes.push(`${courses.length} Gradescope course${courses.length === 1 ? "" : "s"}, ${assignments.length} assignments, ${grades.length} scores`);
       if (unmatched) notes.push(`${unmatched} Gradescope course${unmatched === 1 ? "" : "s"} matched none of your courses (add the course first)`);
-      if (courses.length === 0) notes.push("No courses found on the Gradescope page; its layout may have changed");
+      if (courses.length === 0) notes.push("This Gradescope sign-in has no classes. Link Gradescope again so it opens through Blackboard.");
     } finally {
       if (jar.dirty) await ctx.secrets.set(GRADESCOPE_COOKIES, jar.serialize());
     }

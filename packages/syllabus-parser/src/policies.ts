@@ -28,7 +28,11 @@ function paragraphFrom(lines: string[], start: number, maxChars = 400): string {
 /** Contact info and the late-work policy, by keyword. */
 export function extractPolicies(text: string): ParsedPolicies {
   const lines = text.split(/\r?\n/);
-  const instructorEmails = [...new Set(text.match(EMAIL) ?? [])];
+  // Contacts sit at the top of a syllabus; service desks further down are not your instructor.
+  const head = lines.slice(0, 60).join("\n");
+  const instructorEmails = [...new Set(head.match(EMAIL) ?? [])].filter(
+    (e) => !/@\.|\.\./.test(e) && !/^(disability|help|info|support|registrar|univithelp|care|advising|admissions|noreply|no-reply)/i.test(e),
+  );
   const officeLine = lines.find((l) => /office hours?/i.test(l) && l.trim().length > 14);
   const officeHours = officeLine ? officeLine.trim().replace(OFFICE, "") || undefined : undefined;
   // Consecutive late-work paragraphs ("Late work: …" then "Late policy: …") belong together.

@@ -91,3 +91,53 @@ export async function notifyChanges(db: Db, d: DashboardData, dueSoonHours: numb
   if (fresh.length > shown.length) await notifier.notify("School dashboard", `…and ${fresh.length - shown.length} more updates`);
   return fresh.length;
 }
+
+/** Parts of a moment in the school's time zone. */
+export function zoned(now: Date, tz: string): { day: string; hhmm: string; weekday: number } {
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23", weekday: "short" })
+      .formatToParts(now)
+      .map((x) => [x.type, x.value]),
+  );
+  const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(p.weekday ?? "");
+  return { day: `${p.year}-${p.month}-${p.day}`, hhmm: `${p.hour}:${p.minute}`, weekday: wd };
+}
+
+function clock12(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  return `${((h ?? 0) % 12) || 12}:${String(m ?? 0).padStart(2, "0")} ${(h ?? 0) < 12 ? "AM" : "PM"}`;
+}
+
+/**
+ * The morning brief: today's classes (with rooms), what's due today, and
+ * what changed since yesterday's brief. Short enough for one notification.
+ */
+export function morningBrief(d: DashboardData, tz: string, now: Date, since?: string): { title: string; body: string; lines: string[] } {
+  const today = zoned(now, tz);
+  const code = new Map(d.courses.map((c) => [c.id, c.code]));
+  const classes = d.courses
+    .flatMap((c) => c.meetings.filter((m) => m.weekday === today.weekday).map((m) => ({ c, m })))
+    .sort((a, b) => a.m.start.localeCompare(b.m.start))
+    .map(({ c, m }) => `${c.code} ${clock12(m.start)}${m.location ? ` (${m.location})` : ""}`);
+  const due = d.assignments
+    .filter((a) => !a.done && a.dueAt && zoned(new Date(a.dueAt), tz).day === today.day && a.courseId !== "unassigned")
+    .sort((a, b) => a.dueAt!.localeCompare(b.dueAt!))
+    .map((a) => `${a.title} (${code.get(a.courseId) ?? ""}${a.kind === "reading" ? "" : `, ${clock12(zoned(new Date(a.dueAt!), tz).hhmm)}`})`);
+  const fresh = d.changes.filter((c) => !c.seen && (!since || c.at > since));
+  const count = (k: string) => fresh.filter((c) => c.kind === k).length;
+  const news = [
+    count("grade") && `${count("grade")} new grade${count("grade") === 1 ? "" : "s"}`,
+    count("due-moved") && `${count("due-moved")} deadline${count("due-moved") === 1 ? "" : "s"} moved`,
+    count("new-assignment") && `${count("new-assignment")} new assignment${count("new-assignment") === 1 ? "" : "s"}`,
+    count("announcement") && `${count("announcement")} announcement${count("announcement") === 1 ? "" : "s"}`,
+  ].filter(Boolean) as string[];
+  const holds = d.sis?.holds.length ?? 0;
+  const lines = [
+    classes.length ? `Classes: ${classes.join(", ")}` : "No classes today",
+    due.length ? `Due today: ${due.join("; ")}` : "Nothing due today",
+    ...(news.length ? [`Since yesterday: ${news.join(", ")}`] : []),
+    ...(holds ? [`${holds} hold${holds === 1 ? "" : "s"} on your record`] : []),
+  ];
+  const dayName = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "long", month: "short", day: "numeric" }).format(now);
+  return { title: `Good morning · ${dayName}`, body: lines.join(". ").slice(0, 240), lines };
+}

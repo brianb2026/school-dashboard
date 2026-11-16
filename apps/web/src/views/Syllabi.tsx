@@ -104,7 +104,7 @@ export function Syllabi({ onChanged }: { onChanged: () => void }) {
               </span>
               <span className="faint num" style={{ fontSize: 12 }}>{new Date(s.uploadedAt).toLocaleDateString()}</span>
               <span className="chip">
-                {s.auto && s.confirmed && <span className="tag ok" title="Pulled from Blackboard and applied because its weights added up to 100%">auto</span>}
+                {s.auto && s.confirmed && <span className="tag ok" title="Pulled from your course site and applied because its weights added up to 100%">auto</span>}
                 <button type="button" className={`btn ${s.confirmed ? "" : "primary"}`} onClick={() => void openRecord(s.id)}>{s.confirmed ? "Edit" : "Review"}</button>
                 <button
                   type="button"
@@ -136,6 +136,7 @@ interface ItemDraft {
   title: string;
   kind: AssignmentKind;
   line: string;
+  url?: string;
 }
 
 function Review({ rec, courses, onClose, onSaved }: { rec: SyllabusRecord; courses: Course[]; onClose: () => void; onSaved: () => Promise<void> }) {
@@ -147,14 +148,14 @@ function Review({ rec, courses, onClose, onSaved }: { rec: SyllabusRecord; cours
   const ap = rec.applied;
   const lineFor = (name: string) => p.weights.weights.find((w) => w.name === name)?.line ?? "";
   const [weights, setWeights] = useState(
-    ap
+    ap && (ap.weights.length > 0 || p.weights.weights.length === 0)
       ? ap.weights.map((w) => ({ name: w.name, weight: String(w.weight), dropLowest: w.dropLowest ? String(w.dropLowest) : "", line: lineFor(w.name) }))
-      : p.weights.weights.map((w) => ({ name: w.name, weight: String(w.weight), dropLowest: "", line: w.line })),
+      : p.weights.weights.map((w) => ({ name: w.name, weight: String(w.weight), dropLowest: (w as { dropLowest?: number }).dropLowest ? String((w as { dropLowest?: number }).dropLowest) : "", line: w.line })),
   );
   const [items, setItems] = useState<ItemDraft[]>(() => {
-    const parsed = p.dates.map((d) => ({ include: true, date: d.date, time: "", title: d.title, kind: d.kind, line: d.line }));
+    const parsed = p.dates.map((d) => ({ include: true, date: d.date, time: d.time ?? "", title: d.title, kind: d.kind, line: d.line, url: d.url }));
     if (!ap) return parsed;
-    const saved = ap.items.map((i) => ({ include: true, date: i.date, time: i.time ?? "", title: i.title, kind: i.kind, line: "" }));
+    const saved = ap.items.map((i) => ({ include: true, date: i.date, time: i.time ?? "", title: i.title, kind: i.kind, line: "", url: i.url }));
     const left = parsed.filter((d) => !ap.items.some((i) => i.date === d.date && i.title === d.title)).map((d) => ({ ...d, include: false }));
     return [...saved, ...left].sort((a, b) => a.date.localeCompare(b.date));
   });
@@ -183,7 +184,7 @@ function Review({ rec, courses, onClose, onSaved }: { rec: SyllabusRecord; cours
         ? { newCourse: { code: nc.code, name: nc.name, credits: Number(nc.credits), level: nc.level, color: nc.color } }
         : { courseId: courseChoice }),
       weights: weights.filter((w) => w.name.trim()).map((w) => ({ name: w.name, weight: Number(w.weight), dropLowest: Number(w.dropLowest) || undefined })),
-      items: items.filter((i) => i.include).map((i) => ({ date: i.date, time: i.time || undefined, title: i.title, kind: i.kind })),
+      items: items.filter((i) => i.include).map((i) => ({ date: i.date, time: i.time || undefined, title: i.title, kind: i.kind, url: i.url })),
       instructorEmails: emails.split(/[,\s]+/).filter(Boolean),
       officeHours,
       latePolicy,
@@ -289,7 +290,7 @@ function Review({ rec, courses, onClose, onSaved }: { rec: SyllabusRecord; cours
         })}
         <div className="pad">
           <button type="button" className="btn" onClick={() => setItems([...items, { include: true, date: "", time: "", title: "", kind: "homework", line: "" }])}>+ Add item</button>
-          <span className="faint" style={{ marginLeft: 12, fontSize: 12 }}>No time = due 11:59 pm. If Blackboard lists the same item, the Blackboard copy wins.</span>
+          <span className="faint" style={{ marginLeft: 12, fontSize: 12 }}>No time = due 11:59 pm. If Blackboard or Canvas lists the same item, that copy wins.</span>
         </div>
       </Panel>
 

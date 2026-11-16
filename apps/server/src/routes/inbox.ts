@@ -1,12 +1,9 @@
-import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { providerFromEnv } from "@sd/ai";
-import { AuthExpiredError, buildMime, composeLink, connectorById, gmail, gmailBody } from "@sd/connectors";
+import { AuthExpiredError, buildMime, composeLink, gmail, gmailBody } from "@sd/connectors";
 import type { OutgoingMessage } from "@sd/core";
 import type { AppContext } from "../app.js";
-import { getFile, markAnnouncementRead, setSetting } from "../db/client.js";
+import { dismissAnnouncement, markAnnouncementRead, markChangesSeen, setSetting } from "../db/client.js";
 import { EXPIRED_FLAG } from "../sync/scheduler.js";
 
 function cleanMessage(b: Partial<OutgoingMessage> | undefined): OutgoingMessage {
@@ -23,6 +20,20 @@ export function inboxRoutes(app: FastifyInstance, ctx: AppContext): void {
 
   app.post<{ Params: { id: string }; Body: { read?: boolean } }>("/api/announcements/:id/read", async (req, reply) => {
     if (!markAnnouncementRead(db, req.params.id, req.body?.read !== false)) return reply.code(404).send({ error: "No such announcement." });
+    return { ok: true };
+  });
+
+  /** "Got it": everything in What changed up to this one has been seen. */
+  app.post<{ Body: { upTo?: number } }>("/api/changes/seen", async (req, reply) => {
+    const upTo = Number(req.body?.upTo);
+    if (!Number.isInteger(upTo) || upTo < 0) return reply.code(400).send({ error: "Which changes?" });
+    markChangesSeen(db, upTo);
+    return { ok: true };
+  });
+
+  /** Hide an announcement for good (it stays in Blackboard). `{ dismissed: false }` undoes it. */
+  app.post<{ Params: { id: string }; Body: { dismissed?: boolean } }>("/api/announcements/:id/dismiss", async (req, reply) => {
+    if (!dismissAnnouncement(db, req.params.id, req.body?.dismissed !== false)) return reply.code(404).send({ error: "No such announcement." });
     return { ok: true };
   });
 
@@ -77,44 +88,5 @@ export function inboxRoutes(app: FastifyInstance, ctx: AppContext): void {
     } catch {
       return reply.code(502).send({ error: "The AI provider did not answer." });
     }
-  });
-
-  /**
-   * Download a course file through the linked sign-in. Kept on disk afterwards
-   * so it opens offline. Always sent as a download, never rendered in the page.
-   */
-  app.get<{ Params: { id: string } }>("/api/files/:id/download", async (req, reply) => {
-    const file = getFile(db, req.params.id);
-    if (!file) return reply.code(404).send({ error: "No such file." });
-    const dir = ctx.dataDir ? join(ctx.dataDir, "files") : undefined;
-    // The cache name is a hash, so nothing in a file's name or id can point outside the folder.
-    const cached = dir ? join(dir, createHash("sha256").update(`${file.id}@${file.modified ?? ""}`).digest("hex")) : undefined;
-    let bytes: Uint8Array;
-    if (cached && existsSync(cached)) bytes = readFileSync(cached);
-    else {
-      const connector = connectorById(file.source.source);
-      if (!connector?.download) return reply.code(400).send({ error: "This file can't be downloaded from here." });
-      try {
-        ({ bytes } = await connector.download(sync.context(), file));
-      } catch (e) {
-        if (e instanceof AuthExpiredError) {
-          const flag = EXPIRED_FLAG[connector.id];
-          if (flag) setSetting(db, flag, "true");
-          return reply.code(409).send({ error: "Blackboard sign-in expired. Reconnect, then try again." });
-        }
-        return reply.code(502).send({ error: "Blackboard did not hand over that file." });
-      }
-      if (cached && dir) {
-        mkdirSync(dir, { recursive: true, mode: 0o700 });
-        writeFileSync(cached, bytes, { mode: 0o600 });
-        chmodSync(cached, 0o600);
-      }
-    }
-    const name = file.name.replace(/[\r\n"\\/]/g, "_").slice(0, 150) || "file";
-    const type = /^[\w.+-]+\/[\w.+-]+$/.test(file.mimeType ?? "") && !/html|javascript|svg|xml/i.test(file.mimeType!) ? file.mimeType! : "application/octet-stream";
-    return reply
-      .header("content-type", type)
-      .header("content-disposition", `attachment; filename="${name.replace(/[^\x20-\x7e]/g, "_")}"; filename*=UTF-8''${encodeURIComponent(name)}`)
-      .send(Buffer.from(bytes));
   });
 }

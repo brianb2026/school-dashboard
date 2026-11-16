@@ -1,21 +1,72 @@
+import { decodeEntities } from "@sd/core";
+
 /**
  * Turn an uploaded syllabus into plain text, one visual line per line.
  * Runs fully locally:
  *   PDF  → pdf.js (via unpdf), lines rebuilt from text positions
- *   DOCX → mammoth       TXT/MD → as is
+ *   DOCX → mammoth; tables keep their shape (see CELL / PARA below)
+ *   TXT/MD → as is
  * Scanned (image-only) PDFs return almost no text; the UI then says so and
- * lets you type the weights and dates in (OCR is on the roadmap).
+ * lets you type the weights and dates in.
  */
 export async function extractText(bytes: Uint8Array, filename: string): Promise<string> {
   const ext = filename.toLowerCase().split(".").pop();
-  if (ext === "pdf") return pdfText(bytes);
+  // pdf.js takes over the buffer it is given, so hand it a copy.
+  if (ext === "pdf") return pdfText(bytes.slice());
   if (ext === "docx") {
     const mammoth = await import("mammoth");
-    const { value } = await mammoth.extractRawText({ buffer: Buffer.from(bytes) });
-    return value;
+    const { value } = await mammoth.convertToHtml({ buffer: Buffer.from(bytes) });
+    return docxHtmlToText(value);
   }
   if (ext === "txt" || ext === "md") return new TextDecoder().decode(bytes);
   throw new Error(`Unsupported syllabus format: .${ext} (use PDF, DOCX, TXT or MD)`);
+}
+
+/** Separates table cells on one row. */
+export const CELL = " | ";
+/** Separates paragraphs inside one table cell. */
+export const PARA = " ¶ ";
+
+/** A web link keeps its address after its words, so a "watch this video" row can be opened later. */
+function keepLinks(html: string): string {
+  return html.replace(/<a\b[^>]*\bhref="(https?:\/\/[^"\s]+)"[^>]*>([\s\S]*?)<\/a>/gi, (_m, href: string, inner: string) =>
+    inner.includes("://") ? inner : `${inner} (${href})`,
+  );
+}
+
+function plain(html: string): string {
+  html = keepLinks(html);
+  return decodeEntities(html.replace(/<[^>]+>/g, "")).replace(/[ \t ]+/g, " ").trim();
+}
+/**
+ * Word → text. Paragraphs become lines. A table row becomes ONE line, cells
+ * joined by " | " and paragraphs within a cell by " ¶ ", so a schedule table
+ * still reads "9/3 | topic | … | Journal #1 due ¶ Johnson, “…” (pg. 157-172)".
+ */
+export function docxHtmlToText(html: string): string {
+  const out: string[] = [];
+  const blocks = (s: string): string[] =>
+    s
+      .replace(/<br\s*\/?>/gi, "\n")
+      .split(/<\/(?:p|h[1-6]|li)>/i)
+      .flatMap((b) => plain(b.replace(/\n/g, " ")).split("\n"))
+      .map((x) => x.trim())
+      .filter(Boolean);
+  let rest = html;
+  for (;;) {
+    const start = rest.search(/<table\b/i);
+    if (start < 0) break;
+    out.push(...blocks(rest.slice(0, start)));
+    const end = rest.indexOf("</table>", start);
+    const table = rest.slice(start, end < 0 ? undefined : end);
+    for (const row of table.split(/<\/tr>/i)) {
+      const cells = [...row.matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((m) => blocks(m[1]!).join(PARA));
+      if (cells.some(Boolean)) out.push(cells.join(CELL));
+    }
+    rest = end < 0 ? "" : rest.slice(end + "</table>".length);
+  }
+  out.push(...blocks(rest));
+  return out.join("\n");
 }
 
 interface PdfItem {

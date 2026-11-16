@@ -50,6 +50,11 @@ export class CookieJar {
     return this.cookies.length;
   }
 
+  /** A copy of the cookies (for handing a saved session back to the sign-in browser). */
+  list(): StoredCookie[] {
+    return this.cookies.map((c) => ({ ...c }));
+  }
+
   /** Keep only cookies a given host would receive. */
   forHost(host: string): CookieJar {
     return new CookieJar(this.cookies.filter((c) => domainMatches(host, c)));

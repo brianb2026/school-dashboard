@@ -101,7 +101,7 @@ async function client(ctx: ConnectorContext): Promise<BlackboardClient> {
 export const blackboardRest: Connector = {
   id: "blackboard-rest",
   label: "Blackboard (official API)",
-  capabilities: ["courses", "assignments", "grades", "attendance", "announcements", "download"],
+  capabilities: ["courses", "assignments", "grades", "announcements", "download"],
   async status(ctx) {
     if (!restConfigured(ctx.env)) return { state: "not-configured", detail: "Needs an app key and school IT approval" };
     if (!(await ctx.secrets.get(REST_TOKENS))) return { state: "needs-sign-in", detail: "Link Blackboard to approve read access" };

@@ -154,7 +154,7 @@ export function resolveCourseGrade(input: ResolveInput): ResolvedGrade {
   if (bb) {
     options.push({
       basis: "blackboard",
-      label: `Blackboard “${bb.label}”`,
+      label: `${bb.source.source === "canvas" ? "Canvas" : "Blackboard"} “${bb.label}”`,
       percent: bb.percent!,
       letter: bb.letter ?? letterFor(bb.percent!, input.cutoffs),
       weightGraded: 100,

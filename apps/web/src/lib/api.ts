@@ -20,7 +20,7 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
       body: json !== undefined ? JSON.stringify(json) : rest.body,
     });
   } catch {
-    throw new ApiError("Can't reach the local server. Is `npm run dev` running?", 0);
+    throw new ApiError("Can't reach the dashboard. Is it still running? Start it with npm start.", 0);
   }
   const text = await res.text();
   const data = text ? JSON.parse(text) : undefined;
@@ -36,8 +36,8 @@ export function uploadFile<T>(path: string, file: File): Promise<T> {
   });
 }
 
-/** Load once, with a reload() for after edits. */
-export function useApi<T>(path: string): { data?: T; error?: string; loading: boolean; reload: () => Promise<void> } {
+/** Load once, with a reload() for after edits and mutate() to show a change before the server confirms it. */
+export function useApi<T>(path: string): { data?: T; error?: string; loading: boolean; reload: () => Promise<void>; mutate: (fn: (d: T) => T) => void } {
   const [data, setData] = useState<T>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
@@ -55,7 +55,8 @@ export function useApi<T>(path: string): { data?: T; error?: string; loading: bo
   useEffect(() => {
     void reload();
   }, [reload]);
-  return { data, error, loading, reload };
+  const mutate = useCallback((fn: (d: T) => T) => setData((d) => (d === undefined ? d : fn(d))), []);
+  return { data, error, loading, reload, mutate };
 }
 
 export const enc = encodeURIComponent;

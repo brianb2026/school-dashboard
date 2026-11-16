@@ -22,3 +22,4 @@ uploads/
 
 # Demo run (npm run demo)
 .demo-data/
+apps/menubar/build/

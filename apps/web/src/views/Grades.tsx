@@ -1,67 +1,472 @@
-import { useMemo, useState } from "react";
-import {
-  gpa,
-  gradeTrend,
-  requiredOnRemaining,
-  resolveCourseGrade,
-  type AssignmentView,
-  type CourseView,
-  type GradeEntry,
-  type GradeSourcePref,
-  type GradingCategory,
-  type ResolveInput,
-} from "@sd/core";
+import { useMemo, useState, type CSSProperties } from "react";
+import { gpa, gradeTrend, requiredOnRemaining, type AssignmentView, type CourseView, type GradingCategory } from "@sd/core";
+import { Icon } from "../components/Icon";
+import { canPreview } from "../components/Viewer";
 import { api, colorVar, enc } from "../lib/api";
-import { Feedback, useAction, useDash } from "../lib/dash";
-import { pct } from "../lib/format";
-import { Panel } from "../panels/Panel";
+import { courseMap, Feedback, lmsOf, useAction, useDash } from "../lib/dash";
+import { hhmm, pct, WEEKDAYS } from "../lib/format";
+import { setPref, usePref } from "../lib/prefs";
+import { isExam } from "../lib/prep";
+import { project, type Trial } from "../lib/whatif";
+import { CourseContent } from "./CourseContent";
+import { AddItem, GradeCard, Work } from "./Work";
+import { countdown } from "./Home";
 
-const FROM: Record<string, string> = { blackboard: "Blackboard's letter scale", syllabus: "the syllabus", manual: "your own scale", school: "the school default" };
+const LEVEL: Record<string, string> = { regular: "", honors: "Honors", ap: "AP", ib: "IB", de: "Dual enrollment" };
+const ROLE: Record<string, string> = { instructor: "Instructor", ta: "Teaching assistant", staff: "Staff", student: "Student" };
+const dateParts = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+const weekdayFmt = new Intl.DateTimeFormat(undefined, { weekday: "short" });
+const longDate = new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" });
 
+/** Midterms, finals, quizzes, projects and papers: the dates worth knowing ahead. */
+function isKeyDate(a: AssignmentView): boolean {
+  return ["exam", "project", "paper", "quiz"].includes(a.kind) || /\b(midterm|final|exam|test)\b/i.test(a.title);
+}
+
+/** Every class's grade (with what-if), plus its teacher, syllabus and important dates. */
 export function Grades() {
-  const { d, go } = useDash();
-  if (d.courses.length === 0) {
-    return <p className="empty">No classes yet. <button type="button" className="link" onClick={() => go("Today")}>Link Blackboard</button> and grades fill in by themselves.</p>;
-  }
+  const { d, classPick, classItem, showClass } = useDash();
+  if (d.courses.length === 0) return <p className="empty-lg">No classes yet. They show up after the first sync with your school.</p>;
+  const c = courseMap(d).get(classPick ?? "") ?? d.courses[0]!;
   return (
-    <div className="stack wide">
-      <GpaWhatIf />
-      {d.courses.map((c) => <CourseCard key={c.id} c={c} />)}
+    <div className="classes-page">
+      <header className="page-head">
+        <h1>Grades</h1>
+        <GpaStrip />
+      </header>
+      <nav className="class-switch" aria-label="Classes">
+        {d.courses.map((x) => (
+          <button
+            key={x.id}
+            type="button"
+            className={`pill ${x.id === c.id ? "on" : ""}`}
+            style={{ "--c": colorVar(x.color) } as CSSProperties}
+            aria-current={x.id === c.id ? "true" : undefined}
+            onClick={() => showClass(x.id)}
+          >
+            {x.code}
+          </button>
+        ))}
+      </nav>
+      {d.sis && d.sis.terms.length > 0 && <Record />}
+      <Profile key={c.id} c={c} focusId={c.id === classPick ? classItem : undefined} />
     </div>
   );
 }
 
-/** "What if I end with these letters?" Runs on this page; nothing is saved. */
-function GpaWhatIf() {
+/** Every term on your official record (from the SIS), newest first; folded until you open it. */
+function Record() {
   const { d } = useDash();
+  const open = usePref("record-open") === "yes";
+  const v = d.sis!;
+  const terms = [...v.terms].reverse();
+  return (
+    <section className="class-list foldable record">
+      <h2>
+        <button type="button" className="fold-btn" onClick={() => setPref("record-open", open ? undefined : "yes")} aria-expanded={open}>
+          <span className={`chev ${open ? "open" : ""}`} aria-hidden>
+            <Icon name="next" size={14} />
+          </span>
+          Official record <span className="faint">{terms.length} term{terms.length === 1 ? "" : "s"} · from the SIS</span>
+        </button>
+      </h2>
+      {open && (
+        <div className="record-terms">
+          {terms.map((t) => (
+            <div key={t.term} className="record-term">
+              <h3>
+                {t.term}
+                <span className="faint num">{t.gpa !== undefined ? `GPA ${t.gpa.toFixed(2)} · ${t.units} units` : "in progress"}</span>
+              </h3>
+              <ul>
+                {t.courses.map((x, i) => (
+                  <li key={`${x.code}${i}`}>
+                    <span className="code">{x.code}</span>
+                    <span className="title">{x.title}</span>
+                    <span className="num faint">{x.units !== undefined ? x.units : ""}</span>
+                    <b className="num grade">{x.grade || (x.status && /enrol/i.test(x.status) ? "–" : x.status ?? "")}</b>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** GPA in one line; "Try letters" opens a what-if. Nothing is saved. */
+function GpaStrip() {
+  const { d } = useDash();
+  const [open, setOpen] = useState(false);
   const [pick, setPick] = useState<Record<string, string>>({});
   const scale = d.gpaScale;
   const letters = scale ? Object.keys(scale.points) : [];
   const rows = d.courses.map((c) => ({ c, letter: pick[c.id] ?? c.grade.letter ?? "" }));
+  const tried = Object.keys(pick).length > 0;
   const result = scale ? gpa(rows.filter((r) => r.letter).map((r) => ({ letter: r.letter, credits: r.c.credits, level: r.c.level })), scale) : undefined;
-  const changed = Object.keys(pick).length > 0;
   return (
-    <Panel title="GPA" meta={changed ? <button type="button" className="link" onClick={() => setPick({})}>back to actual</button> : "pick letters to try a what-if"}>
-      <div className="gpa-row">
-        <div className="gpa">
-          <div><div className="big">{result ? result.gpa.toFixed(2) : "–"}</div><div className="label">{changed ? "what-if GPA" : "GPA so far"}</div></div>
-          {result && result.gpa !== result.unweighted && <div><div className="big muted">{result.unweighted.toFixed(2)}</div><div className="label">unweighted</div></div>}
-          {changed && d.gpa && <div><div className="big muted">{d.gpa.gpa.toFixed(2)}</div><div className="label">actual</div></div>}
-        </div>
+    <div className="gpa-strip">
+      {d.sis?.gpa !== undefined && !tried && (
+        <span className="gpa-num official" title={`From your official grades in the SIS: ${d.sis.units} graded units`}>
+          <span className="label">Official GPA</span>
+          <b className="num">{d.sis.gpa.toFixed(2)}</b>
+        </span>
+      )}
+      <span className="gpa-num">
+        <span className="label">{tried ? "What-if GPA" : d.sis?.gpa !== undefined ? "This term so far" : "GPA so far"}</span>
+        <b className="num">{result ? result.gpa.toFixed(2) : "–"}</b>
+        {tried && d.gpa && <span className="faint num">was {d.gpa.gpa.toFixed(2)}</span>}
+        {!tried && result && result.gpa !== result.unweighted && <span className="faint num">{result.unweighted.toFixed(2)} unweighted</span>}
+        {d.gpa && <span className="faint num">{d.gpa.credits} credits</span>}
+      </span>
+      {scale && (
+        <button type="button" className="btn ghost sm" onClick={() => (open ? (setOpen(false), setPick({})) : setOpen(true))} aria-expanded={open}>
+          {open ? "Done" : "Try letters"}
+        </button>
+      )}
+      {open && (
         <div className="gpa-picks">
           {rows.map(({ c, letter }) => (
             <label key={c.id} className="mini">
               <span className="swatch" style={{ background: colorVar(c.color) }} /> {c.code}
               <select value={letter} onChange={(e) => setPick({ ...pick, [c.id]: e.target.value })} aria-label={`${c.code} letter`}>
                 <option value="">–</option>
-                {letters.map((l) => <option key={l}>{l}</option>)}
+                {letters.map((l) => (
+                  <option key={l}>{l}</option>
+                ))}
               </select>
-              <span className="faint">{c.credits} cr</span>
             </label>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function Profile({ c, focusId }: { c: CourseView; focusId?: string }) {
+  const { d } = useDash();
+  const [trials, setTrials] = useState<Record<string, Trial>>({});
+  const [adding, setAdding] = useState(false);
+  const p = useMemo(() => project(d, c, trials), [d, c, trials]);
+  const mine = useMemo(() => d.assignments.filter((a) => a.courseId === c.id), [d.assignments, c.id]);
+  const now = Date.now();
+  const tried = Object.keys(trials).length;
+  const setTrial = (id: string, t: Trial | undefined) =>
+    setTrials((x) => {
+      const next = { ...x };
+      if (t) next[id] = t;
+      else delete next[id];
+      return next;
+    });
+  const trend = useMemo(
+    () =>
+      gradeTrend({
+        scheme: c.scheme ? { categories: c.scheme } : undefined,
+        assignments: mine,
+        grades: d.grades.filter((g) => mine.some((a) => a.id === g.assignmentId)),
+        cutoffs: c.cutoffs,
+        categoryOf: (a) => (a as AssignmentView).categoryResolved,
+      }),
+    [c, mine, d.grades],
+  );
+
+  return (
+    <div className="profile" style={{ "--c": colorVar(c.color) } as CSSProperties}>
+      <div className="profile-main">
+        <header className="class-head">
+          <p className="code">
+            {c.code} · {c.credits} credit{c.credits === 1 ? "" : "s"}
+            {LEVEL[c.level] ? ` · ${LEVEL[c.level]}` : ""}
+          </p>
+          <h1>{c.name}</h1>
+          <p className="facts-line">
+            {c.meetings.length > 0 && (
+              <span>
+                {c.meetings.map((m) => `${WEEKDAYS[m.weekday]!.slice(0, 3)} ${hhmm(m.start)}–${hhmm(m.end)}`).join(", ")}
+                {c.meetings[0]?.location ? ` · ${c.meetings[0].location}` : ""}
+              </span>
+            )}
+            {c.url && (
+              <a className="link quiet" href={c.url} target="_blank" rel="noreferrer noopener">
+                {lmsOf(c.id)} <Icon name="external" size={12} />
+              </a>
+            )}
+          </p>
+        </header>
+
+        <GradeCard c={c} p={p} tried={tried} onReset={() => setTrials({})} extra={!tried && <Spark points={trend} />} />
+        <GradeTools c={c} base={p.now} />
+        <Work c={c} items={mine} cats={tried ? p.next.categories : c.grade.categories} trials={trials} setTrial={setTrial} focusId={focusId} />
+        <ContentFold c={c} />
+        <footer className="class-foot">
+          {adding ? (
+            <AddItem c={c} onDone={() => setAdding(false)} />
+          ) : (
+            <button type="button" className="btn ghost" onClick={() => setAdding(true)}>
+              <Icon name="plus" /> Add an assignment
+            </button>
+          )}
+        </footer>
       </div>
-    </Panel>
+
+      <aside className="profile-side">
+        <Teachers c={c} />
+        <KeyDates c={c} items={mine} now={now} />
+        <Syllabus c={c} />
+      </aside>
+    </div>
+  );
+}
+
+/** Blackboard's own folders for this class, folded until you open them (remembered). */
+function ContentFold({ c }: { c: CourseView }) {
+  const open = usePref("content-open") === "yes";
+  return (
+    <section className="class-list foldable">
+      <h2>
+        <button type="button" className="fold-btn" onClick={() => setPref("content-open", open ? undefined : "yes")} aria-expanded={open}>
+          <span className={`chev ${open ? "open" : ""}`} aria-hidden>
+            <Icon name="next" size={14} />
+          </span>
+          Course content <span className="faint">as in {lmsOf(c.id)}</span>
+        </button>
+      </h2>
+      {open && <CourseContent c={c} />}
+    </section>
+  );
+}
+
+/** One quiet row: "what do I need for an A−?", which number to show, and the grade weights. */
+function GradeTools({ c, base }: { c: CourseView; base: ReturnType<typeof project>["now"] }) {
+  const { reload, go } = useDash();
+  const [editing, setEditing] = useState(false);
+  const [target, setTarget] = useState("");
+  const act = useAction();
+  const g = c.grade;
+  const goal = target ? Number(target) : undefined;
+  const need = goal !== undefined && base.percent !== undefined ? requiredOnRemaining(base.percent, base.weightGraded, goal) : undefined;
+  if (editing) return <SchemeEditor c={c} onDone={() => setEditing(false)} />;
+  return (
+    <section className="grade-tools">
+      {base.percent !== undefined && (
+        <label className="mini">
+          What do I need for
+          <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label={`${c.code} target grade`}>
+            <option value="">a letter…</option>
+            {c.cutoffs
+              .filter((x) => x.min > 0)
+              .map((x) => (
+                <option key={x.letter} value={x.min}>
+                  {x.letter} ({x.min}%)
+                </option>
+              ))}
+          </select>
+        </label>
+      )}
+      <span className="spacer" />
+      {g.options.length > 1 && (
+        <label className="mini">
+          Show
+          <select
+            value={c.gradeSource ?? "auto"}
+            onChange={(e) =>
+              void act.run(async () => {
+                await api(`/api/courses/${enc(c.id)}`, { method: "PATCH", json: { gradeSource: e.target.value } });
+                await reload();
+              })
+            }
+            aria-label={`${c.code} grade source`}
+          >
+            <option value="auto">Best available</option>
+            {g.options.map((o) => (
+              <option key={o.basis} value={o.basis}>
+                {o.label} · {pct(o.percent)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {c.syllabus === "review" && (
+        <button type="button" className="link quiet" onClick={() => go("Syllabi")}>
+          Check syllabus
+        </button>
+      )}
+      <button type="button" className="link quiet" onClick={() => setEditing(true)}>
+        {c.scheme ? "Edit weights" : "Enter weights"}
+      </button>
+      {need !== undefined && goal !== undefined && (
+        <p className={`need ${need > 100 ? "danger-text" : ""}`}>
+          {need > 100
+            ? `Out of reach: it would take ${need.toFixed(1)}% on everything left.`
+            : need <= 0
+              ? "Already locked in, even with zeros on what's left."
+              : `You need an average of ${need.toFixed(1)}% on the remaining ${(100 - base.weightGraded).toFixed(0)}% of the grade.`}
+        </p>
+      )}
+      {target && need === undefined && <p className="need faint">Everything is graded already.</p>}
+      {(() => {
+        const letter = c.cutoffs.find((x) => String(x.min) === target)?.letter;
+        if (!letter || !c.cutoffsFilled?.includes(letter)) return null;
+        const own = c.cutoffs.filter((x) => !c.cutoffsFilled!.includes(x.letter) && x.min > 0).map((x) => `${x.letter} at ${x.min}%`);
+        return (
+          <p className="need faint">
+            Your syllabus doesn't set {letter}; it only guarantees {own.join(", ")}. {letter} uses the usual cutoff, so treat it as a guide.
+          </p>
+        );
+      })()}
+      <Feedback error={act.error} />
+    </section>
+  );
+}
+
+function Teachers({ c }: { c: CourseView }) {
+  const { compose, toast } = useDash();
+  const people = [...c.instructors].sort((a, b) => (a.role === "instructor" ? 0 : 1) - (b.role === "instructor" ? 0 : 1));
+  const copy = (email: string) =>
+    void navigator.clipboard
+      ?.writeText(email)
+      .then(() => toast(`Copied ${email}`))
+      .catch(() => toast("Couldn't copy. Select the address instead."));
+  return (
+    <section className="side-block">
+      <h2>{people.length > 1 ? "Teachers" : "Teacher"}</h2>
+      {people.length === 0 && <p className="none">{lmsOf(c.id)} doesn't list a teacher for this class.</p>}
+      <ul className="people">
+        {people.map((x, i) => (
+          <li key={`${x.name}${i}`}>
+            <span className="avatar sm" aria-hidden>
+              {x.name.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="who">
+              <b>{x.name}</b>
+              <span className="muted">{ROLE[x.role] ?? x.role}</span>
+              {x.email && (
+                <span className="email">
+                  <a href={`mailto:${x.email}`}>{x.email}</a>
+                  <button type="button" className="icon-btn xs" onClick={() => copy(x.email!)} aria-label={`Copy ${x.email}`} title="Copy">
+                    <Icon name="copy" size={13} />
+                  </button>
+                </span>
+              )}
+              {(x.officeHours || (x.role === "instructor" && i === 0 && c.policies?.officeHours)) && (
+                <span className="oh" title={x.officeHours ?? c.policies?.officeHours}>
+                  Office hours: {x.officeHours ?? c.policies?.officeHours}
+                </span>
+              )}
+            </span>
+            {x.email && (
+              <button type="button" className="chip-btn" onClick={() => compose({ to: x.email, courseId: c.id })}>
+                <Icon name="mail" size={14} /> Write
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function KeyDates({ c, items, now }: { c: CourseView; items: AssignmentView[]; now: number }) {
+  const { d, setFocus, prep } = useDash();
+  const list = items.filter((a) => a.dueAt && isKeyDate(a)).sort((a, b) => a.dueAt!.localeCompare(b.dueAt!));
+  const nextId = list.find((a) => Date.parse(a.dueAt!) >= now)?.id;
+  const termEnd = d.term.end;
+  return (
+    <section className="side-block">
+      <h2>Important dates</h2>
+      {list.length === 0 && <p className="none">No exams or big deadlines found yet. They come from {lmsOf(c.id)} and the syllabus.</p>}
+      <ul className="key-dates">
+        {list.map((a) => {
+          const at = new Date(a.dueAt!);
+          const past = at.getTime() < now;
+          return (
+            <li key={a.id} className={`${past ? "past" : ""} ${a.id === nextId ? "next" : ""}`}>
+              <button type="button" className="kd" onClick={() => setFocus({ mode: "class", courseId: c.id, itemId: a.id })} title={longDate.format(at)}>
+                <span className="kd-date">
+                  <span className="kd-wd">{weekdayFmt.format(at)}</span>
+                  <span className="num">{dateParts.format(at)}</span>
+                </span>
+                <span className="kd-text">
+                  <span className="item-title">{a.title}</span>
+                  <span className="item-sub">
+                    {a.kind === "exam" ? "Exam" : a.kind === "quiz" ? "Quiz" : a.kind === "project" ? "Project" : a.kind === "paper" ? "Paper" : "Deadline"}
+                    {a.score !== undefined && a.possible ? ` · ${Math.round((a.score / a.possible) * 100)}%` : ""}
+                  </span>
+                </span>
+                <span className="left">{past ? (a.score !== undefined ? "graded" : "done") : countdown(a.dueAt!, now)}</span>
+              </button>
+              {!past && isExam(a) && (
+                <button type="button" className="chip-btn prep-btn kd-prep" onClick={() => prep(a.id)} title="Exam prep: what to study">
+                  <Icon name="book" size={14} /> Prep
+                </button>
+              )}
+            </li>
+          );
+        })}
+        {termEnd && (
+          <li className="term-end">
+            <span className="kd">
+              <span className="kd-date">
+                <span className="kd-wd">{weekdayFmt.format(new Date(`${termEnd}T12:00:00`))}</span>
+                <span className="num">{dateParts.format(new Date(`${termEnd}T12:00:00`))}</span>
+              </span>
+              <span className="kd-text">
+                <span className="item-title">Term ends</span>
+                <span className="item-sub">{d.term.name}</span>
+              </span>
+            </span>
+          </li>
+        )}
+      </ul>
+    </section>
+  );
+}
+
+function Syllabus({ c }: { c: CourseView }) {
+  const { d, view, go } = useDash();
+  const files = d.files.filter((f) => f.courseId === c.id && f.isSyllabus);
+  return (
+    <section className="side-block">
+      <h2>
+        Syllabus
+        {c.syllabus === "review" && <span className="tag warn">needs a look</span>}
+      </h2>
+      {files.length === 0 ? (
+        <p className="none">
+          None found in {lmsOf(c.id)} yet.{" "}
+          <button type="button" className="link" onClick={() => go("Syllabi")}>
+            Upload one
+          </button>
+        </p>
+      ) : (
+        <ul className="syl-files">
+          {files.slice(0, 4).map((f) => (
+            <li key={f.id}>
+              <Icon name="file" size={14} />
+              <span className="syl-name" title={f.name}>
+                {f.name.replace(/\.[a-z0-9]{2,5}$/i, "")}
+              </span>
+              {canPreview(f.name) && (
+                <button type="button" className="chip-btn" onClick={() => view(f)}>
+                  Open
+                </button>
+              )}
+              <a className="icon-btn" href={`/api/files/${enc(f.id)}/download`} download={f.name} aria-label={`Download ${f.name}`} title="Download">
+                <Icon name="download" size={14} />
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="syl-note">
+        {c.syllabus === "applied" ? "Grade weights and dates were read from it." : c.syllabus === "review" ? "Weights were found but need a quick check." : "Weights and dates fill in once one is read."}{" "}
+        <button type="button" className="link quiet inline" onClick={() => go("Syllabi")}>
+          All syllabi
+        </button>
+      </p>
+    </section>
   );
 }
 
@@ -81,195 +486,6 @@ function Spark({ points }: { points: { percent: number; title: string }[] }) {
       <polyline points={xy.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ")} fill="none" stroke="var(--accent)" strokeWidth="1.5" />
       <circle cx={last[0]} cy={last[1]} r="2.5" fill="var(--accent)" />
     </svg>
-  );
-}
-
-function CourseCard({ c }: { c: CourseView }) {
-  const { d, reload, go } = useDash();
-  const [hyp, setHyp] = useState<Record<string, string>>({});
-  const [target, setTarget] = useState("");
-  const [editing, setEditing] = useState(false);
-  const act = useAction();
-
-  const mine = useMemo(() => d.assignments.filter((a) => a.courseId === c.id), [d.assignments, c.id]);
-  const grades = useMemo(() => d.grades.filter((g) => mine.some((a) => a.id === g.assignmentId)), [d.grades, mine]);
-  const input: ResolveInput = useMemo(
-    () => ({
-      scheme: c.scheme ? { categories: c.scheme } : undefined,
-      assignments: mine,
-      grades,
-      overall: d.overall.filter((o) => o.courseId === c.id),
-      cutoffs: c.cutoffs,
-      prefer: c.gradeSource,
-      categoryOf: (a) => (a as AssignmentView).categoryResolved,
-    }),
-    [c, mine, grades, d.overall],
-  );
-  const trend = useMemo(() => gradeTrend(input), [input]);
-  const own: GradeSourcePref = c.scheme ? "syllabus" : "points";
-  // Your own work only (no Blackboard snapshot): the base for every what-if.
-  const base = useMemo(() => resolveCourseGrade({ ...input, overall: [], prefer: own }), [input, own]);
-
-  const graded = mine.filter((a) => a.score !== undefined);
-  const upcoming = mine.filter((a) => a.score === undefined && a.countsTowardGrade !== false && a.status !== "excused");
-  const tries = Object.entries(hyp).filter(([, v]) => v !== "" && Number.isFinite(Number(v)));
-  const projected = useMemo(() => {
-    if (!tries.length) return undefined;
-    const extra: GradeEntry[] = tries.map(([id, v]) => {
-      const possible = mine.find((a) => a.id === id)?.pointsPossible || 100;
-      return { assignmentId: id, courseId: c.id, score: (Number(v) / 100) * possible, pointsPossible: possible, source: { source: "manual", fetchedAt: "" } };
-    });
-    return resolveCourseGrade({ ...input, overall: [], prefer: own, grades: [...grades, ...extra] });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(tries), input, own]);
-
-  const targetPct = target ? Number(target) : undefined;
-  const need = targetPct !== undefined && base.percent !== undefined ? requiredOnRemaining(base.percent, base.weightGraded, targetPct) : undefined;
-  const bbOpt = c.grade.options.find((o) => o.basis === "blackboard");
-  const sylOpt = c.grade.options.find((o) => o.basis === "syllabus");
-  const g = c.grade;
-
-  const patchCourse = (body: object) =>
-    act.run(async () => {
-      await api(`/api/courses/${enc(c.id)}`, { method: "PATCH", json: body });
-      await reload();
-    });
-  const setCategory = (a: AssignmentView, category: string) =>
-    act.run(async () => {
-      await api(`/api/assignments/${enc(a.id)}`, { method: "PATCH", json: { category: category || null } });
-      await reload();
-    });
-
-  return (
-    <Panel
-      title={`${c.code} · ${c.name}`}
-      meta={
-        <span className="chip">
-          <span className="swatch" style={{ background: colorVar(c.color) }} />
-          {c.credits} credits
-        </span>
-      }
-    >
-      <div className="grade-head">
-        <div>
-          <div className="big num">{pct(g.percent)} <span className="letter">{g.letter ?? ""}</span></div>
-          <div className="label">
-            {g.basis === "none" ? "No graded work yet" : g.label}
-            {g.basis === "syllabus" && ` · ${g.weightGraded}% of the grade is in`}
-          </div>
-        </div>
-        <Spark points={trend} />
-        <span className="spacer" />
-        {g.options.length > 0 && (
-          <label className="mini">
-            show
-            <select value={c.gradeSource ?? "auto"} onChange={(e) => void patchCourse({ gradeSource: e.target.value })} aria-label={`${c.code} grade source`}>
-              <option value="auto">Best available</option>
-              {g.options.map((o) => <option key={o.basis} value={o.basis}>{o.label} · {pct(o.percent)}</option>)}
-            </select>
-          </label>
-        )}
-      </div>
-      {bbOpt && sylOpt && Math.abs(bbOpt.percent - sylOpt.percent) >= 2 && (
-        <p className="help pad-x">
-          Blackboard says {pct(bbOpt.percent)}; your syllabus weights give {pct(sylOpt.percent)}. They differ when the instructor's gradebook counts things
-          differently from the syllabus, or when some items below aren't in a category yet.
-        </p>
-      )}
-
-      {c.scheme && !editing && (
-        <div className="cats">
-          {g.categories.map((cat) => (
-            <div key={cat.name} className="row cat-row">
-              <span>{cat.name}</span>
-              <span className="num muted">{cat.weight}%</span>
-              <span className="num">{pct(cat.percent)}</span>
-              <span className="bar"><span style={{ width: `${Math.min(100, cat.percent ?? 0)}%`, background: colorVar(c.color) }} /></span>
-              <span className="faint num" style={{ fontSize: 12 }}>{cat.count} graded</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {editing && <SchemeEditor c={c} onDone={() => setEditing(false)} />}
-      {!editing && (
-        <div className="pad-x toolbar thin">
-          {c.scheme ? (
-            <span className="faint" style={{ fontSize: 12 }}>Weights from {c.schemeFrom === "syllabus" ? "the syllabus" : "you"}.</span>
-          ) : (
-            <span className="faint" style={{ fontSize: 12 }}>
-              No grading weights yet{c.syllabus === "review" ? ": a syllabus is waiting for a quick check." : "."}
-            </span>
-          )}
-          <button type="button" className="link" onClick={() => setEditing(true)}>{c.scheme ? "edit weights" : "enter weights"}</button>
-          {!c.scheme && <button type="button" className="link" onClick={() => go("Syllabi")}>{c.syllabus === "review" ? "review syllabus" : "upload syllabus"}</button>}
-          <span className="spacer" />
-          <span className="faint" style={{ fontSize: 12 }} title={c.cutoffs.map((x) => `${x.letter} ≥ ${x.min}`).join("   ")}>
-            Letters use {FROM[c.cutoffsFrom]} (A ≥ {c.cutoffs.find((x) => x.letter === "A")?.min ?? "?"})
-          </span>
-        </div>
-      )}
-
-      {base.percent !== undefined && (
-        <div className="whatif pad-x">
-          <label className="mini">
-            What do I need for
-            <select value={target} onChange={(e) => setTarget(e.target.value)} aria-label={`${c.code} target grade`}>
-              <option value="">a target…</option>
-              {c.cutoffs.filter((x) => x.min > 0).map((x) => <option key={x.letter} value={x.min}>{x.letter} ({x.min}%)</option>)}
-            </select>
-          </label>
-          {need !== undefined && targetPct !== undefined && (
-            <span className={need > 100 ? "warn-text" : ""}>
-              {need > 100
-                ? `Out of reach: it would take ${need.toFixed(1)}% on everything left.`
-                : need <= 0
-                  ? "Already secured, even with zeros on what's left."
-                  : `Average ${need.toFixed(1)}% on the remaining ${(100 - base.weightGraded).toFixed(0)}% of the grade.`}
-            </span>
-          )}
-          {target && need === undefined && <span className="faint">Everything is graded already.</span>}
-        </div>
-      )}
-
-      <details className="items">
-        <summary>
-          {graded.length} graded, {upcoming.length} to go
-          {g.uncategorized > 0 && c.scheme ? <span className="warn-text"> · {g.uncategorized} not in a category</span> : ""}
-          {projected?.percent !== undefined && (
-            <span className="proj"> · what-if: <b className="num">{pct(projected.percent)} {projected.letter}</b></span>
-          )}
-        </summary>
-        {graded.map((a) => (
-          <div key={a.id} className="row item-grade-row">
-            <span>{a.title}{a.countsTowardGrade === false && <span className="faint"> (not counted)</span>}</span>
-            <span className="num">{a.score}/{a.possible}{a.scoreIsYours ? "*" : ""}</span>
-            <span className="num muted">{a.possible ? pct((a.score! / a.possible) * 100, 0) : ""}</span>
-            {c.scheme ? (
-              <select value={a.categoryResolved && c.scheme.some((x) => x.name === a.categoryResolved) ? a.categoryResolved : ""} onChange={(e) => void setCategory(a, e.target.value)} aria-label={`${a.title} category`}>
-                <option value="">no category</option>
-                {c.scheme.map((x) => <option key={x.name}>{x.name}</option>)}
-              </select>
-            ) : (
-              <span className="faint">{a.category ?? ""}</span>
-            )}
-          </div>
-        ))}
-        {upcoming.length > 0 && <p className="help pad-x" style={{ marginTop: 8 }}>Try scores for what's left (as a percent) to see where the grade would land:</p>}
-        {upcoming.map((a) => (
-          <div key={a.id} className="row item-grade-row">
-            <span>{a.title}</span>
-            <label className="mini">
-              <input type="number" min={0} max={150} step={1} placeholder="%" value={hyp[a.id] ?? ""} onChange={(e) => setHyp({ ...hyp, [a.id]: e.target.value })} aria-label={`What-if score for ${a.title}`} />
-              %
-            </label>
-            <span className="faint num">{a.pointsPossible ? `${a.pointsPossible} pts` : ""}</span>
-            <span className="faint">{a.categoryResolved ?? ""}</span>
-          </div>
-        ))}
-        {tries.length > 0 && <div className="pad-x"><button type="button" className="link" onClick={() => setHyp({})}>clear what-if scores</button></div>}
-      </details>
-      <div className="pad-x"><Feedback error={act.error} /></div>
-    </Panel>
   );
 }
 

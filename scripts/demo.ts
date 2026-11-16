@@ -32,6 +32,8 @@ if (!process.argv.includes("--keep")) rmSync(dataDir, { recursive: true, force: 
 process.env.DATA_DIR = dataDir;
 process.env.PORT = process.env.PORT ?? "5180";
 process.env.VAULT_KEY = "file"; // keep the demo out of your Keychain
+// The demo only ever links to its own pretend Blackboard, so a real sign-in can't end up in this throwaway folder.
+process.env.DEMO_ONLY_BASE = bb.base;
 process.env.OPEN_BROWSER = process.env.OPEN_BROWSER ?? "1";
 console.log(`Demo data goes in ${dataDir} (deleted on the next demo run).`);
 console.log(`In the dashboard, use  ${bb.base}  as the Blackboard address.`);

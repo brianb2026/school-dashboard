@@ -28,6 +28,8 @@ export interface FakeBlackboard {
     renames: Map<string, string>;
     /** Gradebook columns the instructor deleted. */
     removedColumns: Set<string>;
+    /** New due dates the instructor set (column id → ISO), for "deadline moved" tests. */
+    moved: Map<string, string>;
   };
   respond(method: string, url: URL, cookie: string): FakeReply;
   fetch: FetchLike;
@@ -51,12 +53,57 @@ Collaboration is allowed on labs but not on projects or exams. Please read the a
 <p>Mar 4  Midterm exam</p>
 `;
 
-export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBlackboard {
+const CSC_SCHEDULE_HTML = `
+<h3>Weekly schedule</h3>
+<p>Readings are from the course textbook and should be done before the first lecture of the week. Slides are posted in each week's folder after class.</p>
+<p>Week of March 8: Read Chapter 5.1 Hash tables</p>
+<p>Week of March 15: Read Chapter 6.2 Binary search trees</p>
+<p>Week of March 22: Read Chapter 7.1 Graphs</p>
+`;
+
+const attr = (s: string) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+
+/**
+ * A pretend Gradescope: the account page and one course page, shaped like the
+ * real HTML. Project 1 is the item Blackboard links to (and scores a little
+ * differently); Lab 3 exists only here.
+ */
+export function fakeGradescope(now = new Date()): { fetch: FetchLike; cookie: FakeBlackboard["sessionCookie"]; seen: string[]; state: { empty: boolean } } {
+  const seen: string[] = [];
+  const state = { empty: false };
+  const stamp = (days: number) => `${new Date(now.getTime() + days * 86_400_000).toISOString().slice(0, 10)} 23:59:00 -0400`;
+  const account = () => `<div class="courseList"><div class="courseList--term">Spring 2027</div><div class="courseList--coursesForTerm">${
+    state.empty
+      ? ""
+      : '<a class="courseBox " data-loginrequired="false" href="/courses/9001"><h3 class="courseBox--shortname">CSC 172</h3><div class="courseBox--name">Data Structures</div></a>'
+  }<button class="courseBox courseBox-new">Add a course</button></div></div>`;
+  const row = (id: string, title: string, score: string, due: number) =>
+    `<tr role="row"><th scope="row"><a href="/courses/9001/assignments/${id}/submissions/1">${title}</a></th><td>${score}</td>` +
+    `<td><time class="submissionTimeChart--dueDate" datetime="${stamp(due)}">due</time></td></tr>`;
+  const course = `<table id="assignments-student-table"><thead><tr><th>Name</th><th>Status</th><th>Due</th></tr></thead><tbody>${
+    row("5001", "Project 1", '<div class="submissionStatus--score">47.0 / 50.0</div>', -12) +
+    row("5002", "Lab 3", '<div class="submissionStatus--score">18.0 / 20.0</div>', -4) +
+    row("5003", "Homework 5", '<div class="submissionStatus--text">No Submission</div>', 6)
+  }</tbody></table>`;
+  const fetchImpl: FetchLike = async (input, init) => {
+    const url = new URL(String(input));
+    const cookie = new Headers(init?.headers).get("cookie") ?? "";
+    seen.push(`${url.host}${url.pathname}`);
+    if (url.host !== "www.gradescope.com") throw new TypeError(`fake Gradescope: unexpected host ${url.host}`);
+    if (!/_gradescope_session=ok/.test(cookie)) return new Response(null, { status: 302, headers: { location: "/login" } });
+    if (url.pathname === "/account") return new Response(account(), { status: 200, headers: { "content-type": "text/html" } });
+    if (url.pathname === "/courses/9001") return new Response(course, { status: 200, headers: { "content-type": "text/html" } });
+    return new Response("", { status: 404 });
+  };
+  return { fetch: fetchImpl, seen, state, cookie: { name: "_gradescope_session", value: "ok", domain: "www.gradescope.com", path: "/", secure: true, hostOnly: true } };
+}
+
+export function fakeBlackboard(opts: { base?: string; now?: Date; /** Project 1 is a link into Gradescope, the way schools that launch Gradescope from Blackboard set it up. */ gradescope?: boolean } = {}): FakeBlackboard {
   const base = opts.base ?? "https://learn.fake-school.test";
   const host = new URL(base).hostname;
   const now = opts.now ?? new Date();
   const iso = (days: number) => new Date(now.getTime() + days * 86_400_000).toISOString();
-  const state: FakeBlackboard["state"] = { sessionValid: true, forbidden: new Set(["meetings"]), unauthorized: new Set(), log: [], lateGrade: false, renames: new Map(), removedColumns: new Set() };
+  const state: FakeBlackboard["state"] = { sessionValid: true, forbidden: new Set(["meetings"]), unauthorized: new Set(), log: [], lateGrade: false, renames: new Map(), removedColumns: new Set(), moved: new Map() };
 
   const courses = {
     chem: { id: "_101_1", courseId: "CHEM101.2027SPRING.40112", name: "CHEM 101 - General Chemistry I", termId: "_t1_1", availability: { available: "Yes" } },
@@ -82,14 +129,13 @@ export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBl
       { id: "_c3_1", name: "Midterm Exam 1", score: { possible: 100 }, grading: { type: "Manual", due: iso(-10) }, gradebookCategoryId: "_ex_1" },
       { id: "_c4_1", name: "Lab 1", score: { possible: 25 }, grading: { type: "Attempts", due: iso(-5) }, gradebookCategoryId: "_lab_1" },
       { id: "_c5_1", name: "Homework 0 (old)", score: { possible: 10 }, grading: { type: "Attempts", due: iso(-30) }, gradebookCategoryId: "_hw_1" },
-      { id: "_c6_1", name: "Qwickly Attendance", score: { possible: 20 }, grading: { type: "Manual" } },
       { id: "_c7_1", name: "Start-of-term survey", score: { possible: 5 }, grading: { type: "Attempts" }, includeInCalculations: false },
       { id: "_c8_1", name: "Weighted Total", score: { possible: 100 }, grading: { type: "Calculated" } },
       { id: "_c9_1", name: "Total", score: { possible: 170 }, grading: { type: "Calculated" } },
       { id: "_c10_1", name: "Hidden column", score: { possible: 1 }, availability: { available: "No" } },
     ],
     _172_1: [
-      { id: "_d1_1", name: "Project 1", score: { possible: 50 }, grading: { type: "Manual", due: iso(-12) } },
+      { id: "_d1_1", name: "Project 1", score: { possible: 50 }, grading: { type: "Manual", due: iso(-12) }, ...(opts.gradescope ? { contentId: "_g2_1" } : {}) },
       { id: "_d2_1", name: "Quiz 1", score: { possible: 10 }, grading: { type: "Manual", due: iso(-8) } },
       { id: "_d3_1", name: "Project 2", score: { possible: 50 }, grading: { type: "Manual", due: iso(9) } },
       { id: "_d4_1", name: "Total", score: { possible: 110 }, grading: { type: "Calculated" } },
@@ -101,7 +147,6 @@ export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBl
         { columnId: "_c1_1", status: "Graded", displayGrade: { scaleType: "Score", score: 9, possible: 10 }, lastRelevantDate: iso(-18) },
         { columnId: "_c3_1", status: "Graded", displayGrade: { scaleType: "Score", score: 84, possible: 100 }, lastRelevantDate: iso(-8) },
         { columnId: "_c4_1", status: "NeedsGrading" },
-        { columnId: "_c6_1", status: "Graded", score: 18 },
         { columnId: "_c7_1", status: "Graded", displayGrade: { scaleType: "Score", score: 5, possible: 5 } },
         { columnId: "_c8_1", status: "Graded", displayGrade: { scaleType: "Percent", score: 88.2, possible: 100, text: "88.2%" } },
         { columnId: "_c9_1", status: "Graded", displayGrade: { scaleType: "Score", score: 116, possible: 135 } },
@@ -148,17 +193,41 @@ export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBl
       { id: "_a2_1", title: "Draft, not posted", body: "x", draft: true, created: iso(-1) },
     ],
   };
+  // Ultra keeps the syllabus as a file embedded in a document, inside "Course Overview → Syllabus".
+  const syllabusDoc =
+    `<p>The syllabus for this term:</p><a data-bbtype="attachment" data-bbfile="${attr(JSON.stringify({ linkName: "CHEM101_Syllabus.pdf", mimeType: "application/pdf", render: "inline" }))}" ` +
+    `href="${base}/bbcswebdav/pid-1-dt-content-rid-2_1/xid-1_1?X-Blackboard-Expiration=1&amp;X-Blackboard-Signature=abc">CHEM101_Syllabus.pdf</a>` +
+    `<a data-bbtype="image" data-bbfile="${attr(JSON.stringify({ linkName: "banner.png", mimeType: "image/png" }))}" href="${base}/bbcswebdav/pid-1-dt-content-rid-9_1/xid-9_1">banner</a>`;
   const contents: Record<string, unknown[]> = {
     _101_1: [
-      { id: "_f1_1", title: "Course Information", contentHandler: { id: "resource/x-bb-folder" } },
-      { id: "_f2_1", parentId: "_f1_1", title: "Syllabus", modified: iso(-50), contentHandler: { id: "resource/x-bb-file", file: { fileName: "CHEM101_Syllabus.pdf" } } },
-      { id: "_f3_1", parentId: "_f1_1", title: "Week 1 slides", modified: iso(-40), contentHandler: { id: "resource/x-bb-file", file: { fileName: "week1.pptx" } } },
+      { id: "_f1_1", title: "Course Overview - Start Here", contentHandler: { id: "resource/x-bb-folder" } },
+      { id: "_f4_1", parentId: "_f1_1", title: "Syllabus", contentHandler: { id: "resource/x-bb-folder" } },
+      { id: "_f2_1", parentId: "_f4_1", title: "ultraDocumentBody", body: syllabusDoc, modified: iso(-50), contentHandler: { id: "resource/x-bb-document" } },
+      { id: "_f5_1", title: "Week 1", contentHandler: { id: "resource/x-bb-folder" } },
+      { id: "_f3_1", parentId: "_f5_1", title: "Week 1 slides", modified: iso(-40), contentHandler: { id: "resource/x-bb-file", file: { fileName: "week1.pptx" } } },
+      { id: "_f6_1", parentId: "_f5_1", title: "Lab 1 handout", modified: iso(-12), contentHandler: { id: "resource/x-bb-file", file: { fileName: "Lab 1 handout.pdf" } } },
+      { id: "_f7_1", parentId: "_f5_1", title: "Hidden draft", availability: { available: "No" }, contentHandler: { id: "resource/x-bb-file", file: { fileName: "draft.pdf" } } },
+      { id: "_f9_1", parentId: "_f5_1", title: "Textbook site", contentHandler: { id: "resource/x-bb-externallink", url: "https://textbook.example/chem" } },
+      { id: "_f8_1", title: "Qwickly Attendance", contentHandler: { id: "resource/x-bb-blti-link", url: "https://attendance.qwickly.example/launch" } },
     ],
-    _172_1: [{ id: "_g1_1", title: "Syllabus", body: CSC_SYLLABUS_HTML, modified: iso(-55), contentHandler: { id: "resource/x-bb-document" } }],
+    _172_1: [
+      { id: "_g1_1", title: "Syllabus", body: CSC_SYLLABUS_HTML, modified: iso(-55), contentHandler: { id: "resource/x-bb-document" } },
+      { id: "_g3_1", title: "Course Schedule", body: CSC_SCHEDULE_HTML, modified: iso(-54), contentHandler: { id: "resource/x-bb-document" } },
+      ...(opts.gradescope
+        ? [
+            {
+              id: "_g2_1",
+              title: "Project 1",
+              description: "Submit on Gradescope",
+              contentHandler: { id: "resource/x-bb-blti-link", url: "https://gs-proxy.example/launch", customParameters: { custom_gradescope_resource_id: "assignment-5001" } },
+            },
+          ]
+        : []),
+    ],
   };
   const attachments: Record<string, unknown[]> = {
-    _f2_1: [{ id: "_att1_1", fileName: "CHEM101_Syllabus.pdf", mimeType: "application/pdf" }],
     _f3_1: [{ id: "_att2_1", fileName: "week1.pptx", mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }],
+    _f6_1: [{ id: "_att3_1", fileName: "Lab 1 handout.pdf", mimeType: "application/pdf" }],
   };
   const people: Record<string, unknown[]> = {
     _101_1: [
@@ -200,14 +269,15 @@ export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBl
     }
     if (p.startsWith("/bbcswebdav/")) {
       if (!signedIn) return { status: 302, headers: [["location", "/webapps/login/"]], body: "" };
-      const pdf = p.endsWith("xid-1");
+      const which = /xid-(\d+)_1$/.exec(p)?.[1];
+      const name = which === "1" ? "CHEM101_Syllabus.pdf" : which === "3" ? "Lab 1 handout.pdf" : "week1.pptx";
       return {
         status: 200,
         headers: [
-          ["content-type", pdf ? "application/pdf" : "application/octet-stream"],
-          ["content-disposition", `attachment; filename="${pdf ? "CHEM101_Syllabus.pdf" : "week1.pptx"}"`],
+          ["content-type", which === "2" ? "application/octet-stream" : "application/pdf"],
+          ["content-disposition", `attachment; filename="${name}"`],
         ],
-        body: pdf ? new Uint8Array(readFileSync(SYLLABUS_PDF)) : new Uint8Array([80, 75, 3, 4]),
+        body: which === "1" ? new Uint8Array(readFileSync(SYLLABUS_PDF)) : which === "3" ? new TextEncoder().encode("%PDF-1.4\n% pretend handout\n") : new Uint8Array([80, 75, 3, 4]),
       };
     }
 
@@ -229,8 +299,10 @@ export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBl
     if ((m = /\/v1\/terms\/([^/]+)$/.exec(p))) return terms[m[1]!] ? json(terms[m[1]!], slide()) : status(404);
     if ((m = /\/v[12]\/courses\/([^/]+)\/gradebook\/columns$/.exec(p))) {
       const cols = (columns[m[1]!] ?? []).filter((c) => !state.removedColumns.has((c as { id: string }).id)).map((c) => {
-        const col = c as { id: string; name: string };
-        return state.renames.has(col.id) ? { ...col, name: state.renames.get(col.id) } : col;
+        const col = c as { id: string; name: string; grading?: { due?: string } };
+        const due = state.moved.get(col.id);
+        const moved = due ? { ...col, grading: { ...col.grading, due } } : col;
+        return state.renames.has(col.id) ? { ...moved, name: state.renames.get(col.id) } : moved;
       });
       return page(cols);
     }
@@ -244,9 +316,9 @@ export function fakeBlackboard(opts: { base?: string; now?: Date } = {}): FakeBl
       const item = (contents[m[1]!] ?? []).find((c) => (c as { id: string }).id === m![2]);
       return item ? json(item, slide()) : status(404);
     }
-    if ((m = /\/contents\/([^/]+)\/attachments$/.exec(p))) return page(attachments[m[1]!] ?? []);
+    if ((m = /\/contents\/([^/]+)\/attachments$/.exec(p))) return attachments[m[1]!] ? page(attachments[m[1]!]!) : status(400);
     if ((m = /\/attachments\/([^/]+)\/download$/.exec(p))) {
-      return { status: 302, headers: [["location", m[1] === "_att1_1" ? "/bbcswebdav/xid-1" : "/bbcswebdav/xid-2"]], body: "" };
+      return { status: 302, headers: [["location", m[1] === "_att3_1" ? "/bbcswebdav/xid-3_1" : "/bbcswebdav/xid-2_1"]], body: "" };
     }
     return status(404);
   }

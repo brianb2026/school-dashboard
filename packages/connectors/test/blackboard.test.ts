@@ -132,8 +132,21 @@ describe("mapping helpers", () => {
   });
 });
 
+describe("guessKind", () => {
+  it("calls a final draft writing, not an exam", async () => {
+    const { guessKind } = await import("../src/kinds.js");
+    expect(guessKind("FA #1 Final Draft + Reflection")).toBe("paper");
+    expect(guessKind("Final paper")).toBe("paper");
+    expect(guessKind("Final Exam")).toBe("exam");
+    expect(guessKind("Midterm 1")).toBe("exam");
+    expect(guessKind("Lab report 4")).toBe("lab");
+    expect(guessKind("Final project")).toBe("project");
+    expect(guessKind("Webwork 3")).toBe("homework");
+  });
+});
+
 describe("Blackboard session sync", () => {
-  it("pulls courses, gradebook, totals, attendance, announcements, files; reports what the school hides", async () => {
+  it("pulls courses, gradebook, totals, announcements, files (also ones embedded in Ultra documents); reports what the school hides", async () => {
     const bb = fakeBlackboard({ now: NOW });
     const ctx = context(bb);
     expect((await blackboardSession.status(ctx)).state).toBe("ready");
@@ -163,17 +176,20 @@ describe("Blackboard session sync", () => {
       ["weighted-total", 88.2],
       ["total", 85.9],
     ]);
-    expect(r.attendanceSummaries).toEqual([expect.objectContaining({ courseId: "bb:_101_1", percent: 90, source: expect.objectContaining({ source: "qwickly" }) })]);
 
     expect(r.announcements).toHaveLength(1);
     expect(r.announcements![0]!.body).toBe("Midterm 2 is now Thursday & covers ch. 5–7.\nReview sheet (https://example.edu/review)");
 
+    // The syllabus sits where Ultra courses keep it: a file embedded in a document under "Course Overview → Syllabus".
     expect(r.files!.map((f) => [f.name, f.isSyllabus, f.folder.join("/")])).toEqual([
-      ["CHEM101_Syllabus.pdf", true, "Course Information"],
-      ["week1.pptx", false, "Course Information"],
+      ["CHEM101_Syllabus.pdf", true, "Course Overview - Start Here/Syllabus"],
+      ["week1.pptx", false, "Week 1"],
+      ["Lab 1 handout.pdf", false, "Week 1"],
       ["Syllabus.txt", true, ""],
+      ["Course Schedule.txt", true, ""],
     ]);
-    expect(r.notes!.join("\n")).toMatch(/attendance: not shared with students \(2 courses\)/);
+    expect(r.files![0]).toMatchObject({ mimeType: "application/pdf", url: "/learn/api/public/v1/courses/_101_1/contents/_f2_1#xid-1_1" });
+    expect(r.extras).toEqual({ gradescopeLaunch: [], studentName: "Test" });
     expect(r.notes!.join("\n")).toMatch(/announcements: not shared with students \(CSC 172\)/);
     expect(r.authoritative!.assignments).toEqual(["bb:_101_1:", "bb:_172_1:"]);
 
@@ -182,13 +198,28 @@ describe("Blackboard session sync", () => {
     expect(ctx.secrets.data.get(SESSION_COOKIES)).toMatch(/ok-\d+/);
     expect(ctx.secrets.data.get(SESSION_COOKIES)).not.toContain('"ok-0"');
 
+    // All three kinds of "file" download: embedded in a document, a plain file item, and a typed page.
     const pdf = await blackboardSession.download!(ctx, r.files![0]!);
     expect(new TextDecoder().decode(pdf.bytes.slice(0, 5))).toBe("%PDF-");
-    const page = await blackboardSession.download!(ctx, r.files![2]!);
+    expect(pdf.filename).toBe("CHEM101_Syllabus.pdf");
+    const handout = await blackboardSession.download!(ctx, r.files![2]!);
+    expect(new TextDecoder().decode(handout.bytes)).toMatch(/pretend handout/);
+    const page = await blackboardSession.download!(ctx, r.files![3]!);
     expect(new TextDecoder().decode(page.bytes)).toMatch(/Projects: 40%/);
+    expect(bb.state.log.every((l) => l.startsWith("GET /"))).toBe(true);
   });
 
-  it("attaches to a course you added by hand, skips hidden ones, and a light pass skips files", async () => {
+  it("finds the way into Gradescope: the linked item's exact Gradescope number and a launch address", async () => {
+    const bb = fakeBlackboard({ now: NOW, gradescope: true });
+    const r = await blackboardSession.sync(context(bb));
+    const p1 = r.assignments!.find((a) => a.title === "Project 1")!;
+    expect(p1).toMatchObject({ externalRefs: ["gradescope:5001"], contentId: "_g2_1" });
+    expect(p1.url).toBe("https://learn.fake-school.test/ultra/redirect?redirectType=nautilus&courseId=_172_1&contentId=_g2_1");
+    expect(r.assignments!.find((a) => a.title === "Quiz 1")!.externalRefs).toBeUndefined();
+    expect(r.extras!.gradescopeLaunch).toEqual(["/webapps/blackboard/execute/blti/launchLink?course_id=_172_1&content_id=_g2_1"]);
+  });
+
+  it("attaches to a course you added by hand, skips hidden ones, and a light pass skips the slow extras", async () => {
     const bb = fakeBlackboard({ now: NOW });
     const mine: Course = {
       id: "manual:chem101", code: "chem-101", name: "My chem", term: "S27", credits: 4, level: "regular", color: "c6",
@@ -199,10 +230,11 @@ describe("Blackboard session sync", () => {
     expect(r.courses!.map((c) => c.id)).toEqual(["manual:chem101"]);
     expect(r.courses![0]).toMatchObject({ credits: 4, color: "c6" });
     expect(r.assignments!.every((a) => a.courseId === "manual:chem101")).toBe(true);
-    expect(r.files).toEqual([]);
-    expect(r.authoritative!.files).toEqual([]);
-    expect(bb.state.log.some((l) => l.includes("_172_1/gradebook"))).toBe(false);
-    expect(bb.state.log.some((l) => l.includes("/contents"))).toBe(false);
+    // Files come along on every pass now (one request per course), so a new syllabus or reading shows up fast.
+    expect(r.files!.map((f) => f.courseId)).toEqual(["manual:chem101", "manual:chem101", "manual:chem101"]);
+    expect(r.authoritative!.files).toEqual(["bbfile:_101_1:"]);
+    expect(bb.state.log.some((l) => l.includes("_172_1/"))).toBe(false);
+    expect(bb.state.log.some((l) => /\/users\?|schemas/.test(l))).toBe(false);
   });
 
   it("does not mistake a 401 on one hidden feature for a lost sign-in", async () => {
@@ -213,6 +245,33 @@ describe("Blackboard session sync", () => {
     expect(r.grades!.length).toBeGreaterThan(3);
     expect(r.announcements).toEqual([]);
     expect(r.notes!.join("\n")).toMatch(/announcements: not shared with students \(2 courses\)/);
+  });
+
+  it("keeps each course's content as Blackboard lays it out: folders, pages, files, links and tools", async () => {
+    const bb = fakeBlackboard({ now: NOW, gradescope: true });
+    const r = await blackboardSession.sync(context(bb));
+    const chem = r.contents!.find((c) => c.courseId === r.courses!.find((x) => x.code === "CHEM 101")!.id)!.items;
+    const row = (id: string) => chem.find((x) => x.id === id);
+    // Blackboard's order and nesting.
+    expect(chem.map((x) => [x.title, x.kind, x.parentId ?? "top"])).toEqual([
+      ["Course Overview - Start Here", "folder", "top"],
+      ["Syllabus", "page", "_f1_1"],
+      ["Week 1", "folder", "top"],
+      ["Week 1 slides", "file", "_f5_1"],
+      ["Lab 1 handout", "file", "_f5_1"],
+      ["Textbook site", "link", "_f5_1"],
+      ["Qwickly Attendance", "tool", "top"],
+    ]);
+    // An Ultra page's hidden body is folded into the page: its text, and where its files live.
+    expect(row("_f4_1")).toMatchObject({ kind: "page", bodyIds: ["_f2_1"] });
+    expect(row("_f4_1")!.text).toContain("The syllabus for this term");
+    expect(row("_f9_1")!.href).toBe("https://textbook.example/chem");
+    expect(row("_f8_1")).toMatchObject({ tool: "Qwickly" });
+    expect(row("_f8_1")!.url).toContain("/ultra/redirect?");
+    // Hidden items stay hidden.
+    expect(row("_f7_1")).toBeUndefined();
+    const csc = r.contents!.find((c) => c.courseId === r.courses!.find((x) => x.code === "CSC 172")!.id)!.items;
+    expect(csc.find((x) => x.id === "_g2_1")).toMatchObject({ kind: "tool", tool: "Gradescope" });
   });
 
   it("raises AuthExpiredError when the session is gone", async () => {

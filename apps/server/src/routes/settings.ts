@@ -1,10 +1,11 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
-import { ALL_CONNECTORS, ICAL_SECRET, isLoopback, normalizeBaseUrl } from "@sd/connectors";
+import { ALL_CONNECTORS, GMAIL_CLIENT_SECRET, ICAL_SECRET, isLoopback, normalizeBaseUrl } from "@sd/connectors";
 import type { ConnectorInfo, SettingsInfo } from "@sd/core";
 import type { AppContext } from "../app.js";
-import { lastSync, setSetting, wipeAll } from "../db/client.js";
+import { getSetting, lastSync, setSetting, wipeAll } from "../db/client.js";
+import { morningBrief } from "../notify.js";
 import { findChrome } from "../signin/chrome.js";
 
 export function settingsRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -30,6 +31,8 @@ export function settingsRoutes(app: FastifyInstance, ctx: AppContext): void {
       gpaScale: cfg.gpa.scale,
       notifications: e.NOTIFICATIONS_ENABLED !== "false",
       chromeFound: Boolean(findChrome(e)),
+      demo: Boolean(e.DEMO_ONLY_BASE),
+      gmailRedirectUri: e.GOOGLE_REDIRECT_URI || `http://127.0.0.1:${e.PORT || 5179}/auth/google/callback`,
     };
   }
 
@@ -55,9 +58,44 @@ export function settingsRoutes(app: FastifyInstance, ctx: AppContext): void {
     return info();
   });
 
+  /** The morning brief: what it would say right now, its time ("08:00", or "off"), and a test send. */
+  app.get("/api/brief", async () => {
+    const env = sync.env();
+    const b = morningBrief(await sync.dashboard(), ctx.cfg.timezone, new Date(), getSetting(db, "BRIEF_AT"));
+    return { time: env.MORNING_BRIEF ?? "08:00", ...b };
+  });
+  app.put<{ Body: { time?: string } }>("/api/brief", async (req, reply) => {
+    const t = String(req.body?.time ?? "");
+    if (t !== "off" && !/^([01]\d|2[0-3]):[0-5]\d$/.test(t)) return reply.code(400).send({ error: "Pick a time like 08:00, or turn it off." });
+    setSetting(db, "MORNING_BRIEF", t);
+    return { ok: true };
+  });
+  app.post("/api/brief/send", async () => {
+    const b = morningBrief(await sync.dashboard(), ctx.cfg.timezone, new Date(), getSetting(db, "BRIEF_AT"));
+    await ctx.notifier.notify(b.title, b.body);
+    return { ok: true };
+  });
+
   app.put<{ Body: { enabled?: boolean } }>("/api/settings/notifications", async (req, reply) => {
     if (typeof req.body?.enabled !== "boolean") return reply.code(400).send({ error: "Unknown setting." });
     setSetting(db, "NOTIFICATIONS_ENABLED", req.body.enabled ? "true" : "false");
+    return info();
+  });
+
+  /**
+   * The one-time Google setup, done from Settings instead of a config file.
+   * (For a "Desktop app" OAuth client Google does not treat the client secret
+   * as confidential; the sign-in itself still happens on Google's page.)
+   */
+  app.put<{ Body: { clientId?: string; clientSecret?: string } }>("/api/settings/gmail", async (req, reply) => {
+    if (sync.env().DEMO_ONLY_BASE) return reply.code(400).send({ error: "This is the demo. Start the real app to connect Gmail." });
+    const id = String(req.body?.clientId ?? "").trim();
+    const secret = String(req.body?.clientSecret ?? "").trim();
+    if (!/^[\w-]+\.apps\.googleusercontent\.com$/.test(id)) return reply.code(400).send({ error: "The client ID should end with .apps.googleusercontent.com" });
+    if (secret.length < 10 || secret.length > 200 || /\s/.test(secret)) return reply.code(400).send({ error: "That client secret doesn't look right." });
+    await secrets.set(GMAIL_CLIENT_SECRET, secret);
+    setSetting(db, "GOOGLE_CLIENT_ID", id);
+    setSetting(db, "GOOGLE_CLIENT_SECRET_SAVED", "true");
     return info();
   });
 

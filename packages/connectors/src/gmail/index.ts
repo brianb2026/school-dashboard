@@ -14,12 +14,14 @@ import { AuthExpiredError, HttpError, type Connector, type ConnectorContext, typ
  * Scopes: gmail.readonly (teacher mail) and gmail.send (messages you send).
  */
 export const GMAIL_TOKEN = "gmail.refresh_token";
+/** The Google client secret when it was entered in Settings (kept in the encrypted vault, not in the database). */
+export const GMAIL_CLIENT_SECRET = "gmail.client_secret";
 export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send"];
 const API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const EMAIL = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[^\s@<>"',;]+$/;
 
 export function gmailConfigured(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
+  return Boolean(env.GOOGLE_CLIENT_ID && (env.GOOGLE_CLIENT_SECRET || env.GOOGLE_CLIENT_SECRET_SAVED === "true"));
 }
 
 function redirectUri(env: NodeJS.ProcessEnv): string {
@@ -43,10 +45,11 @@ export function gmailAuthUrl(env: NodeJS.ProcessEnv, state: string, challenge: s
 }
 
 async function token(ctx: ConnectorContext, params: Record<string, string>): Promise<{ access_token?: string; refresh_token?: string }> {
+  const clientSecret = ctx.env.GOOGLE_CLIENT_SECRET || (await ctx.secrets.get(GMAIL_CLIENT_SECRET)) || "";
   const res = await ctx.fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: ctx.env.GOOGLE_CLIENT_ID ?? "", client_secret: ctx.env.GOOGLE_CLIENT_SECRET ?? "", ...params }).toString(),
+    body: new URLSearchParams({ client_id: ctx.env.GOOGLE_CLIENT_ID ?? "", client_secret: clientSecret, ...params }).toString(),
     redirect: "error",
     signal: AbortSignal.timeout(20_000),
   });

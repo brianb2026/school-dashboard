@@ -58,7 +58,9 @@ describe("database", () => {
       a.prepare("INSERT INTO settings (key, value) VALUES ('k', 'v')").run();
       a.close();
       const b = openDb(dir);
-      expect(b.prepare("PRAGMA user_version").get()?.user_version).toBe(4);
+      expect(b.prepare("PRAGMA user_version").get()?.user_version).toBe(9);
+      // Attendance tracking is gone, tables and all.
+      expect(b.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name LIKE 'attendance%'").get()?.n).toBe(0);
       expect(b.prepare("SELECT value FROM settings WHERE key = 'k'").get()?.value).toBe("v");
       b.close();
       const { statSync } = await import("node:fs");
@@ -247,7 +249,7 @@ describe("syllabus upload", () => {
     expect(chem.meetings.map((m) => m.weekday)).toEqual([1, 3, 5]);
     expect(d.assignments.map((a) => [a.title, a.categoryResolved, a.origin])).toEqual([
       ["Midterm Exam 1", "Midterm Exams (2)", "Syllabus"],
-      ["Lab report 4 due", "Labs", "Syllabus"],
+      ["Lab report 4", "Labs", "Syllabus"],
     ]);
     const reopened = (await r.app.inject({ url: `/api/syllabus/${rec.id}` })).json() as SyllabusRecord;
     expect(reopened).toMatchObject({ confirmed: true, auto: false, suggestedCourseId: "manual:chem101" });
@@ -289,7 +291,7 @@ describe("syllabus upload", () => {
 });
 
 describe("your own entries", () => {
-  it("adds work, scores, done marks and attendance; computes the grade and GPA from them", async () => {
+  it("adds work, scores and done marks; computes the grade and GPA from them", async () => {
     r = rig();
     await r.app.inject({ method: "POST", url: "/api/courses", payload: { code: "ART 110", name: "Drawing", credits: 2 } });
     const add = (payload: object) => r.app.inject({ method: "POST", url: "/api/assignments", payload });
@@ -306,17 +308,14 @@ describe("your own entries", () => {
     expect((await r.app.inject({ method: "PATCH", url: `/api/assignments/${enc(a2.id)}`, payload: { effortHours: 500 } })).statusCode).toBe(400);
     expect((await r.app.inject({ method: "PATCH", url: "/api/assignments/missing", payload: { done: true } })).statusCode).toBe(404);
 
-    for (const [date, status] of [["2027-02-01", "present"], ["2027-02-03", "late"], ["2027-02-05", "absent"], ["2027-02-08", "excused"]]) {
-      await r.app.inject({ method: "POST", url: "/api/attendance", payload: { courseId: "manual:art110", date, status } });
-    }
-    expect((await r.app.inject({ method: "POST", url: "/api/attendance", payload: { courseId: "manual:art110", date: "2027-02-10", status: "asleep" } })).statusCode).toBe(400);
+    // Attendance tracking was removed: its routes are gone.
+    expect((await r.app.inject({ method: "POST", url: "/api/attendance", payload: { courseId: "manual:art110", date: "2027-02-01", status: "present" } })).statusCode).toBe(404);
 
     let d = await r.dashboard();
     const art = d.courses[0]!;
     expect(art.grade).toMatchObject({ basis: "points", letter: "A" });
     expect(art.grade.percent).toBeCloseTo(95);
     expect(d.gpa).toMatchObject({ gpa: 4, credits: 2 });
-    expect(art.attendance?.percent).toBeCloseTo((2 / 3) * 100);
     expect(d.assignments.map((a) => [a.title, a.done, a.manual, a.score])).toEqual([
       ["Sketchbook 1", true, true, 19],
       ["Critique", true, true, undefined],
@@ -324,11 +323,9 @@ describe("your own entries", () => {
 
     await r.app.inject({ method: "DELETE", url: `/api/grades/${enc(a1.id)}` });
     await r.app.inject({ method: "DELETE", url: `/api/assignments/${enc(a2.id)}` });
-    await r.app.inject({ method: "DELETE", url: "/api/attendance?courseId=manual%3Aart110&date=2027-02-05" });
     d = await r.dashboard();
     expect(d.assignments.map((a) => a.title)).toEqual(["Sketchbook 1"]);
     expect(d.courses[0]!.grade.basis).toBe("none");
-    expect(d.courses[0]!.attendance?.percent).toBe(100);
 
     // Per-course letter scale and class times; bad values are refused.
     const patch = (payload: object) => r.app.inject({ method: "PATCH", url: "/api/courses/manual%3Aart110", payload });
@@ -383,6 +380,43 @@ describe("writing to a professor", () => {
 
     await r.app.inject({ method: "DELETE", url: "/api/link/gmail" });
     expect((await r.dashboard()).links.gmail.connected).toBe(false);
+  });
+  it("sets Gmail up from Settings: the client secret goes in the vault, never back out, and Connect works right after", async () => {
+    const bodies: string[] = [];
+    const google: FetchLike = async (input, init) => {
+      const u = new URL(String(input));
+      if (u.host === "oauth2.googleapis.com") {
+        bodies.push(String(init?.body));
+        return Response.json({ access_token: "at", refresh_token: "rt" });
+      }
+      if (u.pathname.endsWith("/messages")) return Response.json({ messages: [] });
+      return new Response("{}", { status: 404 });
+    };
+    r = rig({ fetch: google });
+    const info = (await r.app.inject({ url: "/api/settings" })).json() as SettingsInfo;
+    expect(info).toMatchObject({ demo: false, gmailRedirectUri: "http://127.0.0.1:5179/auth/google/callback" });
+    expect((await r.dashboard()).links.gmail).toEqual({ connected: false, configured: false });
+    expect((await r.app.inject({ method: "POST", url: "/api/link/gmail", payload: {} })).statusCode).toBe(400);
+
+    const put = (payload: object) => r.app.inject({ method: "PUT", url: "/api/settings/gmail", payload });
+    expect((await put({ clientId: "not-a-client-id", clientSecret: "GOCSPX-abcdefghijkl" })).statusCode).toBe(400);
+    expect((await put({ clientId: "123-abc.apps.googleusercontent.com", clientSecret: "short" })).statusCode).toBe(400);
+    const saved = await put({ clientId: " 123-abc.apps.googleusercontent.com ", clientSecret: "GOCSPX-abcdefghijkl" });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.body).not.toContain("GOCSPX");
+    expect(r.secrets.data.get("gmail.client_secret")).toBe("GOCSPX-abcdefghijkl");
+    // The database holds the client ID and a "saved" mark, not the secret.
+    expect(JSON.stringify(r.app.ctx.db.prepare("SELECT key, value FROM settings").all())).not.toContain("GOCSPX");
+    expect((await r.dashboard()).links.gmail).toEqual({ connected: false, configured: true });
+
+    const { openUrl } = (await r.app.inject({ method: "POST", url: "/api/link/gmail", payload: {} })).json() as { openUrl: string };
+    const u = new URL(openUrl);
+    expect(u.searchParams.get("client_id")).toBe("123-abc.apps.googleusercontent.com");
+    expect(openUrl).not.toContain("GOCSPX");
+    const back = await r.app.inject({ url: `/auth/google/callback?code=abc&state=${u.searchParams.get("state")}` });
+    expect(back.body).toContain("Gmail connected");
+    expect(bodies[0]).toContain("client_secret=GOCSPX-abcdefghijkl");
+    expect((await r.dashboard()).links.gmail).toEqual({ connected: true, configured: true });
   });
 });
 

@@ -12,6 +12,14 @@ export * from "./extras.js";
 export * from "./policies.js";
 export * from "./weights.js";
 export { extractText, linesFromPlacedText, type PlacedText } from "./extract-text.js";
+export { extractPages, pptxSlides, unzip } from "./pages.js";
+
+/**
+ * Bump when the reader gets better at something. Syllabi that were pulled in
+ * automatically are then read again by themselves (ones you confirmed or
+ * edited are left alone).
+ */
+export const PARSER_VERSION = 3;
 
 export interface SyllabusParse {
   text: string;

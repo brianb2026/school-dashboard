@@ -176,6 +176,43 @@ describe("categoryFor", () => {
     expect(categoryFor("project", "Final project", cats)).toBe("Projects");
     expect(categoryFor("discussion", "Post 3", cats)).toBeUndefined();
   });
+  it("lets a word the title shares with one category beat the catch-all 'homework' guess", () => {
+    const csc = [
+      { name: "Workshop attendance/participation", weight: 5 },
+      { name: "Class attendance", weight: 5 },
+      { name: "Homework assignments", weight: 30 },
+      { name: "Midterm", weight: 30 },
+      { name: "Final", weight: 30 },
+    ];
+    const cat = (title: string, kind: Assignment["kind"]) => matchCategory({ title, kind }, csc);
+    expect(cat("Week 4 Workshop (Week of 9/21)", "homework")).toBe("Workshop attendance/participation");
+    expect(cat("Week 3 Workshop Attendance(Week of 9/14)", "other")).toBe("Workshop attendance/participation");
+    expect(cat("HW 3", "homework")).toBe("Homework assignments");
+    expect(cat("Lab 2", "lab")).toBe("Homework assignments");
+    // An unrecognized title that happens to say "final" is not thereby the final exam.
+    expect(cat("Final review worksheet", "homework")).toBe("Homework assignments");
+    expect(cat("Midterm Exam", "exam")).toBe("Midterm");
+  });
+  it("reads initials, ignores stray numbers, and sends attendance to participation", () => {
+    const wrt = [
+      { name: "Class participation", weight: 15 },
+      { name: "Informal Assignments", weight: 20 },
+      { name: "Formal Assignment 1", weight: 10 },
+      { name: "Formal Assignment 2", weight: 15 },
+      { name: "Formal Assignment 3", weight: 15 },
+      { name: "Formal Assignment 4", weight: 25 },
+    ];
+    const cat = (title: string, kind: Assignment["kind"]) => matchCategory({ title, kind }, wrt);
+    expect(cat("FA #2 First Draft + Reflection", "paper")).toBe("Formal Assignment 2");
+    expect(cat("FA #4 Final Draft + Reflection", "paper")).toBe("Formal Assignment 4");
+    // Nothing says which formal assignment: the general bucket, not "…1" because the title has a 1 in it.
+    expect(cat("Journal #1", "homework")).toBe("Informal Assignments");
+    expect(cat("Film Review", "homework")).toBe("Informal Assignments");
+    expect(cat("Attendance", "other")).toBe("Class participation");
+    // Readings count for nothing here, whatever page numbers they carry.
+    expect(cat("Booth, “Making Good Arguments” (pg. 1-15)", "reading")).toBeUndefined();
+    expect(cat("Review class syllabus", "reading")).toBeUndefined();
+  });
 });
 
 describe("dedupeAssignments", () => {
@@ -224,6 +261,48 @@ describe("mergeAssignments", () => {
     expect(hw3.dueAt).toBe("2027-02-10T04:59:00Z");
     expect(hw3.status).toBe("submitted");
     expect(hw3.sources).toHaveLength(3);
+  });
+  it("merges on the exact Gradescope number even when the names differ, and keeps both scores findable", () => {
+    const r = mergeAssignments(
+      [
+        mk("bb9", "blackboard-session", "Midterm 1 (Gradescope)", "2027-02-10T04:59:00Z", { externalRefs: ["gradescope:5001"] }),
+        mk("gs9", "gradescope", "Exam One", "2027-02-11T15:00:00Z", { externalRefs: ["gradescope:5001"] }),
+        mk("gs8", "gradescope", "Exam Two", "2027-03-11T15:00:00Z", { externalRefs: ["gradescope:5002"] }),
+      ],
+      "America/New_York",
+    );
+    expect(r.assignments.map((a) => a.id).sort()).toEqual(["bb9", "gs8"]);
+    expect(r.primaryOf.get("gs9")).toBe("bb9");
+    expect(r.assignments.find((a) => a.id === "bb9")!.externalRefs).toEqual(["gradescope:5001"]);
+  });
+  it("merges the same reading listed by two syllabus pages on one day", () => {
+    const r = mergeAssignments(
+      [
+        mk("syl:a:1", "syllabus", "Read Chapter 5.1", "2027-03-08T04:59:00Z", { kind: "reading", sources: [{ source: "syllabus", externalId: "a", fetchedAt: "x" }] }),
+        mk("syl:b:1", "syllabus", "Read Chapter 5.1", "2027-03-08T04:59:00Z", { kind: "reading", sources: [{ source: "syllabus", externalId: "b", fetchedAt: "x" }] }),
+        // Same page, a week later: a different reading, however alike the words.
+        mk("syl:b:2", "syllabus", "Read Chapter 5.1", "2027-03-15T04:59:00Z", { kind: "reading", sources: [{ source: "syllabus", externalId: "b", fetchedAt: "x" }] }),
+      ],
+      "America/New_York",
+    );
+    expect(r.assignments).toHaveLength(2);
+  });
+  it("needs a real word in common: 'Webwork 1' is not 'HW1', even due the same night", () => {
+    const r = mergeAssignments(
+      [
+        mk("bbw", "blackboard-session", "Webwork 1 due 9/11 11:59 pm", "2026-09-12T03:59:00Z"),
+        mk("bbh", "blackboard-session", "HW1", "2026-09-12T03:59:00Z"),
+        mk("gsh", "gradescope", "Homework 1", "2026-09-12T03:59:00Z", { externalRefs: ["gradescope:77"] }),
+        // Blackboard says exactly which Gradescope item HW2 is; a look-alike with another number stays separate.
+        mk("bb2", "blackboard-session", "HW2", "2026-09-26T03:59:00Z", { externalRefs: ["gradescope:80"] }),
+        mk("gs2", "gradescope", "HW2", "2026-09-26T03:59:00Z", { externalRefs: ["gradescope:80"] }),
+        mk("gs2b", "gradescope", "HW2 (regrade)", "2026-09-26T03:59:00Z", { externalRefs: ["gradescope:81"] }),
+      ],
+      "America/New_York",
+    );
+    expect(r.primaryOf.get("gsh")).toBe("bbh");
+    expect(r.primaryOf.get("gs2")).toBe("bb2");
+    expect(r.assignments.map((a) => a.id).sort()).toEqual(["bb2", "bbh", "bbw", "gs2b"]);
   });
   it("never merges two rows from one source, or different numbers", () => {
     const r = mergeAssignments(
@@ -274,5 +353,64 @@ describe("htmlToText", () => {
     const t = htmlToText('<p>Exam&nbsp;2 is <b>Friday</b> &amp; covers ch.&#160;5&ndash;7.</p><script>alert(1)</script><ul><li>Bring ID</li><li><a href="https://x.edu/r?a=1&amp;b=2">Review sheet</a></li></ul><a href="javascript:alert(1)">bad</a>');
     expect(t).toBe("Exam 2 is Friday & covers ch. 5–7.\n\n• Bring ID\n• Review sheet (https://x.edu/r?a=1&b=2)\nbad");
     expect(t).not.toMatch(/script|javascript/);
+  });
+});
+
+import { matchMaterials, type CourseFile } from "../src/index.js";
+
+describe("matchMaterials", () => {
+  const file = (id: string, name: string, extra: Partial<CourseFile> = {}): CourseFile => ({ id, courseId: "c", name, folder: [], url: "/x", isSyllabus: false, source: { source: "blackboard-session", fetchedAt: "x" }, ...extra });
+  const files = [
+    file("f1", "Lab 3 handout.pdf"),
+    file("f2", "Lab 13 handout.pdf"),
+    file("f3", "bunn--how-to-read-like-a-writer.pdf"),
+    file("f4", "Syllabus.pdf", { isSyllabus: true }),
+    file("f5", "Lab 3 handout.pdf", { courseId: "other" }),
+    file("f6", "week1.pptx"),
+    file("f7", "starter code.zip", { contentId: "_c9" }),
+  ];
+  const ids = (title: string, kind: "lab" | "reading" | "homework" = "lab", contentId?: string) => matchMaterials({ title, courseId: "c", kind, contentId }, files).map((f) => f.id);
+  it("finds the handout named like the assignment, never a different number or another class", () => {
+    expect(ids("Lab 3")).toEqual(["f1"]);
+    expect(ids("Lab 13")).toEqual(["f2"]);
+    expect(ids("Lab 4")).toEqual([]);
+  });
+  it("offers a file posted in two folders once", () => {
+    const fs = [file("a", "Booth_Making Good Arguments.pdf"), file("b", "Booth_Making Good Arguments.pdf", { folder: ["Week 3"] }), file("c", "Booth slides.pptx")];
+    expect(matchMaterials({ title: "Booth, “Making Good Arguments” (pg. 1-15)", courseId: "c", kind: "reading" }, fs).map((f) => f.id)).toEqual(["a", "c"]);
+  });
+  it("is not fooled by a date in the title", () => {
+    const fs = [file("w5", "Workshop 5.pdf"), file("w6", "Workshop 6.pdf"), file("w10", "Workshop 10.pdf")];
+    const pick = (title: string) => matchMaterials({ title, courseId: "c", kind: "other" }, fs).map((f) => f.id);
+    expect(pick("Week 6 Workshop (Week of 10/5)")).toEqual(["w6"]);
+    expect(pick("Week 10 Workshop Attendance (Week of 11/2)")).toEqual(["w10"]);
+    expect(pick("Week 11 Workshop Attendance (Week of 4/13)")).toEqual([]);
+  });
+  it("finds a reading by its author, and the file that sits on the same Blackboard item", () => {
+    expect(ids("Bunn, “How to Read Like a Writer” (pg. 71-85)", "reading")).toEqual(["f3"]);
+    expect(ids("Project 2", "homework", "_c9")).toEqual(["f7"]);
+    expect(ids("Read Chapter 5.1", "reading")).toEqual([]);
+  });
+});
+
+import { completeScale, isPartialScale } from "../src/letters.js";
+
+describe("letter scales that only guarantee minimums", () => {
+  const usual = [
+    { letter: "A", min: 93 }, { letter: "A-", min: 90 }, { letter: "B+", min: 87 }, { letter: "B", min: 83 }, { letter: "B-", min: 80 },
+    { letter: "C+", min: 77 }, { letter: "C", min: 73 }, { letter: "C-", min: 70 }, { letter: "D+", min: 67 }, { letter: "D", min: 60 }, { letter: "F", min: 0 },
+  ];
+  it("fills the missing letters around the guaranteed ones, keeping the syllabus's own numbers", () => {
+    const math = [{ letter: "A-", min: 90 }, { letter: "B-", min: 80 }, { letter: "C-", min: 70 }, { letter: "D-", min: 60 }, { letter: "F", min: 0 }];
+    expect(isPartialScale(math)).toBe(true);
+    const r = completeScale(math, usual);
+    expect(r.cutoffs.map((c) => `${c.letter} ${c.min}`)).toEqual(["A 93", "A- 90", "B+ 87", "B 83", "B- 80", "C+ 77", "C 73", "C- 70", "D+ 67", "D- 60", "F 0"]);
+    // The usual D (60) would tie the syllabus's D− (60), so it's left out.
+    expect(r.filled).toEqual(["A", "B+", "B", "C+", "C", "D+"]);
+  });
+  it("leaves a complete scale exactly as written", () => {
+    const csc = [{ letter: "A", min: 93 }, { letter: "A-", min: 90 }, { letter: "B+", min: 87 }, { letter: "B", min: 83 }, { letter: "C", min: 73 }, { letter: "D", min: 60 }, { letter: "F", min: 0 }];
+    expect(isPartialScale(csc)).toBe(false);
+    expect(completeScale(csc, usual)).toEqual({ cutoffs: csc, filled: [] });
   });
 });

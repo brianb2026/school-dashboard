@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseSyllabusText } from "../src/index.js";
+import { docxHtmlToText } from "../src/extract-text.js";
+import { extractWeights, parseSyllabusText } from "../src/index.js";
 
 const SAMPLE = `
 CHEM 101 — General Chemistry I        Spring 2027
@@ -118,5 +119,100 @@ describe("credits and meetings", () => {
     expect(m.filter((x) => x.start === "14:00")).toHaveLength(2);
     expect(m.find((x) => x.weekday === 3 && x.start === "11:00")).toMatchObject({ end: "12:15", location: "Hylan 105" });
     expect(m).toHaveLength(6);
+  });
+});
+
+describe("the layouts real syllabi come in", () => {
+  it("weekly rows of textbook chapters, percent-first weights with drops and parts, a timed final", () => {
+    const r = parseSyllabusText(
+      `
+BIO 110 Principles of Biology     Fall 2026
+Grading
+15% Quizzes (2 dropped)
+25% Labs (1 dropped)
+60% Exams (30% Midterm, 30% Final)
+Schedule
+Week 1 (8/31 - 9/2)  Chapter 1.1, 1.2  Cells
+Week 2 (9/7 - 9/9)   Chapter 2.1  Membranes
+Midterm: Wednesday, October 14, in class
+Final exam: December 17, 12:30 pm
+`,
+      "2026-08-26",
+    );
+    expect(r.weights.weights.map((w) => [w.name, w.weight, w.dropLowest])).toEqual([
+      ["Quizzes", 15, 2],
+      ["Labs", 25, 1],
+      ["Midterm", 30, undefined],
+      ["Final", 30, undefined],
+    ]);
+    expect(r.weights.total).toBe(100);
+    expect(r.dates.map((d) => [d.date, d.time, d.kind, d.title])).toEqual([
+      ["2026-08-31", undefined, "reading", "Read Chapter 1.1, 1.2"],
+      ["2026-09-07", undefined, "reading", "Read Chapter 2.1"],
+      ["2026-10-14", undefined, "exam", "Midterm"],
+      ["2026-12-17", "12:30", "exam", "Final exam"],
+    ]);
+  });
+
+  it("weights written as a sentence, a dropped score, and a 'guarantees at least' scale", () => {
+    const text = `
+STAT 201 Probability
+Your grade is 20% homework, 40% final, 20% each for the two midterms. The lowest written HW score will be dropped.
+> 90% will guarantee at least an A-
+> 80% will guarantee at least a B-
+> 70% will guarantee at least a C-
+> 60% will guarantee at least a D
+`;
+    const w = extractWeights(text);
+    expect(w.weights.map((x) => [x.name, x.weight, x.dropLowest])).toEqual([
+      ["Homework", 20, 1],
+      ["Final", 40, undefined],
+      ["Midterms", 40, undefined],
+    ]);
+    expect(w.total).toBe(100);
+    expect(extractLetterScale(text)).toEqual([
+      { letter: "A-", min: 90 },
+      { letter: "B-", min: 80 },
+      { letter: "C-", min: 70 },
+      { letter: "D", min: 60 },
+      { letter: "F", min: 0 },
+    ]);
+  });
+
+  it("a Word schedule table: one row per class, several readings in a cell, a link to watch", () => {
+    const text = docxHtmlToText(`<p>ENG 110 College Writing</p>
+<table>
+<tr><td><p>Date</p></td><td><p>In class</p></td><td><p>Homework due</p></td></tr>
+<tr><td><p>Tue 9/1</p></td><td><p>Introductions</p></td><td><p>Bunn, “How to Read Like a Writer”</p><p>Watch: <a href="https://example.edu/video1">Annotation basics</a></p></td></tr>
+<tr><td><p>Thu 9/3</p></td><td><p>Summary</p></td><td><p>Graff &amp; Birkenstein, “They Say” (pp. 19-29)</p></td></tr>
+<tr><td><p>Tue 9/8</p></td><td><p>Peer review</p></td><td><p>Essay 1 draft due</p></td></tr>
+<tr><td><p>Thu 9/10</p></td><td><p>No class</p></td><td><p>None</p></td></tr>
+</table>`);
+    expect(text.split("\n")[2]).toBe("Tue 9/1 | Introductions | Bunn, “How to Read Like a Writer” ¶ Watch: Annotation basics (https://example.edu/video1)");
+    const r = parseSyllabusText(text, "2026-08-26");
+    expect(r.course).toMatchObject({ code: "ENG 110" });
+    expect(r.dates.map((d) => [d.date, d.kind, d.title, d.url])).toEqual([
+      ["2026-09-01", "reading", "Bunn, “How to Read Like a Writer”", undefined],
+      ["2026-09-01", "reading", "Watch: Annotation basics", "https://example.edu/video1"],
+      ["2026-09-03", "reading", "Graff & Birkenstein, “They Say” (pp. 19-29)", undefined],
+      ["2026-09-08", "paper", "Essay 1 draft due", undefined],
+    ]);
+  });
+
+  it("does not read a fraction as a date, and lists a thing repeated on back-to-back days once", () => {
+    const text = docxHtmlToText(`<p>For rough drafts: the penalty is a 1/3-letter-grade reduction in the final course grade. Participation is 1/4 of the grade.</p>
+<table>
+<tr><td><p>Date</p></td><td><p>Homework due</p></td></tr>
+<tr><td><p>11/3</p></td><td><p>*Individual conference due between 11/3-11/10</p></td></tr>
+<tr><td><p>11/5</p></td><td><p>*Individual conference due between 11/3-11/10</p><p>Journal due</p></td></tr>
+<tr><td><p>11/10</p></td><td><p>*Individual conference due between 11/3-11/10</p></td></tr>
+<tr><td><p>11/12</p></td><td><p>Journal due</p></td></tr>
+</table>`);
+    const r = parseSyllabusText(text, "2026-08-26");
+    expect(r.dates.map((d) => [d.date, d.title])).toEqual([
+      ["2026-11-05", "Journal due"],
+      ["2026-11-10", "*Individual conference due between 11/3-11/10"],
+      ["2026-11-12", "Journal due"],
+    ]);
   });
 });

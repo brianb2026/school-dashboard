@@ -18,10 +18,24 @@ export interface SignInWindow {
   cookies(): Promise<StoredCookie[]>;
   /** False once you close the window. */
   isOpen(): Promise<boolean>;
+  /** Addresses the window is showing right now (never page content). */
+  pages(): Promise<string[]>;
   close(): Promise<void>;
 }
 
-export type Launcher = (opts: { url: string; profileDir: string; headless?: boolean }) => Promise<SignInWindow>;
+export interface LaunchOptions {
+  url: string;
+  profileDir: string;
+  headless?: boolean;
+  /**
+   * A session you already have (your saved Blackboard sign-in), handed to the
+   * window before it opens `url`, so a page that needs that sign-in (a tool
+   * opened through Blackboard) loads without asking you again.
+   */
+  cookies?: StoredCookie[];
+}
+
+export type Launcher = (opts: LaunchOptions) => Promise<SignInWindow>;
 
 export function findChrome(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const home = homedir();
@@ -90,7 +104,7 @@ class CdpPipe {
     (child.stdio[3] as Writable).on("error", end);
   }
 
-  send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  send<T>(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<T> {
     if (this.closed) return Promise.reject(new Error("The browser closed."));
     const id = ++this.nextId;
     return new Promise<T>((resolve, reject) => {
@@ -99,7 +113,7 @@ class CdpPipe {
         reject(new Error("The browser did not answer."));
       }, 10_000);
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
-      (this.child.stdio[3] as Writable).write(`${JSON.stringify({ id, method, params })}\0`);
+      (this.child.stdio[3] as Writable).write(`${JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params })}\0`);
     });
   }
 }
@@ -113,7 +127,7 @@ interface CdpCookie {
   secure: boolean;
 }
 
-export const launchChrome: Launcher = async ({ url, profileDir, headless }) => {
+export const launchChrome: Launcher = async ({ url, profileDir, headless, cookies }) => {
   const exe = findChrome();
   if (!exe) throw new Error("Google Chrome is needed for the sign-in window. Install Chrome, then try again.");
   if (!/^https?:\/\//.test(url)) throw new Error("Bad sign-in address");
@@ -127,12 +141,36 @@ export const launchChrome: Launcher = async ({ url, profileDir, headless }) => {
     "--disable-sync",
     "--window-size=980,820",
   ];
-  if (headless) args.push("--headless=new", url);
-  else args.push(`--app=${url}`);
+  // With a session to hand over, start on a blank page, set the cookies, then go to the address.
+  const first = cookies?.length ? "about:blank" : url;
+  if (headless) args.push("--headless=new", first);
+  else args.push(`--app=${first}`);
   const child = spawn(exe, args, { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
   const cdp = new CdpPipe(child);
   // Fail fast if the browser never comes up.
   await cdp.send("Browser.getVersion");
+  if (cookies?.length) {
+    await cdp.send("Storage.setCookies", {
+      cookies: cookies.map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.hostOnly ? c.domain : `.${c.domain}`,
+        path: c.path || "/",
+        secure: c.secure,
+        httpOnly: true,
+        ...(c.expires ? { expires: c.expires } : {}),
+      })),
+    });
+    let page: { targetId: string } | undefined;
+    for (let i = 0; i < 40 && !page; i++) {
+      const t = await cdp.send<{ targetInfos: { type: string; targetId: string }[] }>("Target.getTargets");
+      page = t.targetInfos.find((x) => x.type === "page");
+      if (!page) await new Promise((r) => setTimeout(r, 100));
+    }
+    if (!page) throw new Error("The sign-in window did not open.");
+    const { sessionId } = await cdp.send<{ sessionId: string }>("Target.attachToTarget", { targetId: page.targetId, flatten: true });
+    await cdp.send("Page.navigate", { url }, sessionId);
+  }
 
   return {
     async cookies() {
@@ -146,6 +184,11 @@ export const launchChrome: Launcher = async ({ url, profileDir, headless }) => {
         hostOnly: !c.domain.startsWith("."),
         expires: c.expires > 0 ? Math.floor(c.expires) : undefined,
       }));
+    },
+    async pages() {
+      if (cdp.closed) return [];
+      const r = await cdp.send<{ targetInfos: { type: string; url: string }[] }>("Target.getTargets");
+      return r.targetInfos.filter((t) => t.type === "page" || t.type === "iframe").map((t) => t.url);
     },
     async isOpen() {
       if (cdp.closed) return false;

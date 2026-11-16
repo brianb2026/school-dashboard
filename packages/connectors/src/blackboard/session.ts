@@ -41,13 +41,20 @@ export async function openSession(ctx: ConnectorContext): Promise<{ client: Blac
 
 /** Is this cookie jar signed in to Blackboard right now? Used while the sign-in window is open. */
 export async function sessionWorks(baseUrl: string, jar: CookieJar, fetchImpl: ConnectorContext["fetch"]): Promise<boolean> {
-  if (jar.size === 0) return false;
+  return (await sessionUser(baseUrl, jar, fetchImpl)) !== undefined;
+}
+
+/** Who this cookie jar is signed in as (undefined = not signed in). Reads only your own profile. */
+export async function sessionUser(baseUrl: string, jar: CookieJar, fetchImpl: ConnectorContext["fetch"]): Promise<{ id: string; name?: string } | undefined> {
+  if (jar.size === 0) return undefined;
   try {
     const client = new BlackboardClient({ baseUrl, fetch: fetchImpl, jar, minIntervalMs: 0, timeoutMs: 10_000 });
-    const me = await client.json<{ id?: string }>("/learn/api/public/v1/users/me");
-    return Boolean(me?.id);
+    const me = await client.json<{ id?: string; name?: { given?: string } }>("/learn/api/public/v1/users/me");
+    if (!me?.id) return undefined;
+    // First name only: it is what the sign-in screen greets you with.
+    return { id: me.id, name: me.name?.given?.trim() || undefined };
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -60,7 +67,7 @@ export async function sessionWorks(baseUrl: string, jar: CookieJar, fetchImpl: C
 export const blackboardSession: Connector = {
   id: "blackboard-session",
   label: "Blackboard",
-  capabilities: ["courses", "assignments", "grades", "attendance", "announcements", "download"],
+  capabilities: ["courses", "assignments", "grades", "announcements", "download"],
   async status(ctx) {
     if (await ctx.secrets.get(REST_TOKENS)) return { state: "not-configured", detail: "Using the official API instead" };
     if (!normalizeBaseUrl(ctx.env.BLACKBOARD_BASE_URL) || !(await ctx.secrets.get(SESSION_COOKIES))) {

@@ -1,20 +1,19 @@
-import { htmlToText, type Course, type CourseFile } from "@sd/core";
+import { decodeEntities, htmlToText, type Course, type CourseFile } from "@sd/core";
 import { AuthExpiredError, HttpError, type ConnectorContext, type SyncResult } from "../types.js";
 import type { BlackboardClient } from "./client.js";
 import {
-  attachmentCandidates,
+  gradescopeLaunchPaths,
+  mapContentTree,
+  indexContents,
   isCurrent,
   mapAnnouncements,
-  mapAttachment,
-  mapAttendance,
+  mapContentFiles,
   mapCourse,
   mapGradebook,
-  mapInlineSyllabus,
   mapInstructors,
   mapLetterScale,
   type BbAnnouncement,
   type BbAttachment,
-  type BbAttendanceRecord,
   type BbCategory,
   type BbColumn,
   type BbContent,
@@ -28,13 +27,12 @@ import {
 } from "./map.js";
 
 const MAX_COURSES = 12;
-const MAX_ATTACHMENT_LOOKUPS = 25;
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 function why(e: unknown): string {
   if (e instanceof HttpError) {
     if (e.status === 403) return "not shared with students";
-    if (e.status === 404) return "not available on this Blackboard";
+    if (e.status === 404 || e.status === 400) return "not available on this Blackboard";
     return `error ${e.status}`;
   }
   return (e as Error).message || "failed";
@@ -42,9 +40,10 @@ function why(e: unknown): string {
 
 /**
  * One read-only pass over your Blackboard: current courses, gradebook and
- * your grades, the course total, announcements, and (on a deep pass) files,
- * instructors, the letter scale and attendance. Every optional piece is
- * allowed to fail on its own; what failed is reported in `notes`.
+ * your grades, the course total, announcements and the course's content
+ * (files, where the syllabus is, links into Gradescope); on a deep pass also
+ * instructors and the letter scale. Every optional piece is allowed to fail
+ * on its own; what failed is reported in `notes`.
  */
 export async function syncBlackboard(client: BlackboardClient, ctx: ConnectorContext, source: BbSource): Promise<SyncResult> {
   const baseUrl = client.base.origin;
@@ -94,17 +93,18 @@ export async function syncBlackboard(client: BlackboardClient, ctx: ConnectorCon
     guessed = current.length > 0;
   }
 
-  const result: Required<Pick<SyncResult, "courses" | "assignments" | "grades" | "overall" | "announcements" | "attendanceSummaries" | "files">> & SyncResult = {
+  const result: Required<Pick<SyncResult, "courses" | "assignments" | "grades" | "overall" | "announcements" | "files">> & SyncResult = {
     courses: [],
     assignments: [],
     grades: [],
     overall: [],
     announcements: [],
-    attendanceSummaries: [],
     files: [],
     authoritative: { assignments: [], announcements: [], files: [], overall: [] },
     notes: [],
+    extras: { gradescopeLaunch: [] },
   };
+  if (me.name?.given?.trim()) result.extras!.studentName = me.name.given.trim();
   const usedColors = new Set<string>();
   const known: Course[] = [...ctx.knownCourses];
 
@@ -116,6 +116,18 @@ export async function syncBlackboard(client: BlackboardClient, ctx: ConnectorCon
     if (prev?.hidden) continue; // you removed this course; don't spend requests on it
     const cid = encodeURIComponent(bb.id);
     const label = course.code;
+
+    // The content list first: it says where each gradebook item lives and which ones are Gradescope links.
+    const contents =
+      (await attempt("course files", label, () => client.all<BbContent>(`/learn/api/public/v1/courses/${cid}/contents?recursive=true&limit=200`, 1000))) ??
+      (await attempt("course files (top level)", label, () => client.all<BbContent>(`/learn/api/public/v1/courses/${cid}/contents?limit=200`, 200)));
+    const index = contents ? indexContents(contents, baseUrl, bb.id) : undefined;
+    if (contents) {
+      result.files.push(...mapContentFiles(contents, { courseId: course.id, bbCourseId: bb.id, source, now: ctx.now }));
+      result.authoritative!.files!.push(`bbfile:${bb.id}:`);
+      result.extras!.gradescopeLaunch!.push(...gradescopeLaunchPaths(contents, bb.id).slice(0, 2));
+      (result.contents ??= []).push({ courseId: course.id, items: mapContentTree(contents, baseUrl, bb.id) });
+    }
 
     const columns =
       (await attempt("gradebook", label, () => client.all<BbColumn>(`/learn/api/public/v2/courses/${cid}/gradebook/columns?limit=100`))) ??
@@ -129,11 +141,20 @@ export async function syncBlackboard(client: BlackboardClient, ctx: ConnectorCon
       : undefined;
 
     if (columns) {
-      const gb = mapGradebook({ courseId: course.id, bbCourseId: bb.id, baseUrl, source, columns, grades: grades ?? [], categories: categories ?? [], now: ctx.now });
+      const gb = mapGradebook({
+        courseId: course.id,
+        bbCourseId: bb.id,
+        baseUrl,
+        source,
+        columns,
+        grades: grades ?? [],
+        categories: categories ?? [],
+        contents: index,
+        now: ctx.now,
+      });
       result.assignments.push(...gb.assignments);
       result.grades.push(...gb.grades);
       result.overall.push(...gb.overall);
-      if (gb.attendance) result.attendanceSummaries.push(gb.attendance);
       result.authoritative!.assignments!.push(`bb:${bb.id}:`);
       result.authoritative!.overall!.push(course.id);
     }
@@ -151,34 +172,8 @@ export async function syncBlackboard(client: BlackboardClient, ctx: ConnectorCon
         course.letterCutoffs = scale;
         course.letterCutoffsFrom = "blackboard";
       }
-
       const people = await attempt("instructors", label, () => client.all<BbCourseUser>(`/learn/api/public/v1/courses/${cid}/users?expand=user&limit=100`, 300));
       if (people) course.instructors = mapInstructors(people);
-
-      const att = await attempt("attendance", label, () =>
-        client.all<BbAttendanceRecord>(`/learn/api/public/v1/courses/${cid}/meetings/users/${uid}?limit=100`, 300),
-      );
-      const summary = att ? mapAttendance(att, course.id, source, ctx.now) : undefined;
-      if (summary) result.attendanceSummaries.push(summary);
-
-      const contents =
-        (await attempt("course files", label, () => client.all<BbContent>(`/learn/api/public/v1/courses/${cid}/contents?recursive=true&limit=200`, 600))) ??
-        (await attempt("course files (top level)", label, () => client.all<BbContent>(`/learn/api/public/v1/courses/${cid}/contents?limit=200`, 200)));
-      if (contents) {
-        const byId = new Map(contents.map((c) => [c.id, c]));
-        const fctx = { courseId: course.id, bbCourseId: bb.id, source, now: ctx.now };
-        for (const c of contents) {
-          const inline = mapInlineSyllabus(c, byId, fctx);
-          if (inline) result.files.push(inline);
-        }
-        for (const c of attachmentCandidates(contents, MAX_ATTACHMENT_LOOKUPS)) {
-          const atts = await attempt("file attachments", label, () =>
-            client.all<BbAttachment>(`/learn/api/public/v1/courses/${cid}/contents/${encodeURIComponent(c.id)}/attachments`, 20),
-          );
-          for (const a of atts ?? []) result.files.push(mapAttachment(c, a, byId, fctx));
-        }
-        result.authoritative!.files!.push(`bbfile:${bb.id}:`);
-      }
     }
 
     result.courses.push(course);
@@ -189,22 +184,51 @@ export async function syncBlackboard(client: BlackboardClient, ctx: ConnectorCon
     result.notes!.push(courses.size > 1 ? `${key} (${courses.size} courses)` : `${key} (${[...courses][0]})`);
   }
   if (guessed) result.notes!.push("Couldn't tell which classes are this term's, so the most recently opened ones are shown. Hide any that don't belong (Settings → Classes).");
+  const syllabi = result.files.filter((f) => f.isSyllabus).length;
   result.notes!.unshift(
-    `${result.courses.length} course${result.courses.length === 1 ? "" : "s"}, ${result.assignments.length} gradebook items, ${result.grades.length} grades` +
-      (ctx.deep ? `, ${result.files.length} files` : "") +
-      ` (${client.requests} requests)`,
+    `${result.courses.length} course${result.courses.length === 1 ? "" : "s"}, ${result.assignments.length} gradebook items, ${result.grades.length} grades, ` +
+      `${result.files.length} files (${syllabi} syllabus/schedule) (${client.requests} requests)`,
   );
   return result;
 }
 
-/** Fetch one course file (or a syllabus typed into a page) through the linked session. */
+/**
+ * Fetch one course file through the linked session. Blackboard hands out
+ * short-lived download addresses, so the address is looked up fresh each time:
+ *   …/contents/{id}/attachments   a plain file item
+ *   …/contents/{id}#xid-123_1     a file embedded in a document
+ *   …/contents/{id}  (":body")    a page whose text is the document
+ */
 export async function downloadBlackboardFile(client: BlackboardClient, file: CourseFile): Promise<{ bytes: Uint8Array; filename: string }> {
   if (!file.url.startsWith("/learn/api/public/")) throw new Error("Not a Blackboard file");
   if (file.id.endsWith(":body")) {
     const c = await client.json<BbContent>(file.url);
-    const text = htmlToText(c.body ?? c.description ?? "");
-    return { bytes: new TextEncoder().encode(text), filename: file.name };
+    return { bytes: new TextEncoder().encode(htmlToText(c.body ?? c.description ?? "")), filename: file.name };
   }
-  const got = await client.download(file.url, MAX_FILE_BYTES);
+  const [path, mark] = file.url.split("#");
+  if (mark?.startsWith("xid-")) {
+    const c = await client.json<BbContent>(path!);
+    let found: string | undefined;
+    for (const m of (c.body ?? "").matchAll(/\bhref="([^"]*)"/gi)) {
+      const href = decodeEntities(m[1]!);
+      if (href.includes(`/${mark}`)) {
+        found = href;
+        break;
+      }
+    }
+    if (!found) throw new HttpError(404, "That file is no longer in the course");
+    const u = new URL(found, client.base);
+    if (u.origin !== client.base.origin) throw new Error("Refusing a file address outside Blackboard");
+    const got = await client.download(u.pathname + u.search, MAX_FILE_BYTES);
+    return { bytes: got.bytes, filename: file.name || got.filename || "file" };
+  }
+  if (path!.endsWith("/attachments")) {
+    const atts = await client.all<BbAttachment>(path!, 20);
+    const pick = atts.find((a) => a.fileName === file.name) ?? atts[0];
+    if (!pick) throw new HttpError(404, "That file is no longer in the course");
+    const got = await client.download(`${path}/${encodeURIComponent(pick.id)}/download`, MAX_FILE_BYTES);
+    return { bytes: got.bytes, filename: file.name || pick.fileName || got.filename || "file" };
+  }
+  const got = await client.download(path!, MAX_FILE_BYTES);
   return { bytes: got.bytes, filename: file.name || got.filename || "file" };
 }

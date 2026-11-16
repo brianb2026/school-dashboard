@@ -15,8 +15,8 @@ describe("real files", () => {
       expect(r.dates.map((d) => [d.date, d.kind, d.title])).toEqual([
         ["2027-02-04", "quiz", "Quiz 1"],
         ["2027-02-25", "exam", "Midterm Exam 1"],
-        ["2027-03-18", "lab", "Lab report 4 due"],
-        ["2027-04-29", "project", "Final project due"],
+        ["2027-03-18", "lab", "Lab report 4"],
+        ["2027-04-29", "project", "Final project"],
       ]);
       expect(r.policies.instructorEmails).toEqual(["ada.lin@example.edu"]);
     });
