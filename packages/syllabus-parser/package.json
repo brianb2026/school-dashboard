@@ -10,6 +10,6 @@
   "dependencies": {
     "@sd/core": "*",
     "mammoth": "^1.8.0",
-    "unpdf": "^0.12.1"
+    "unpdf": "^2.1.0"
   }
 }

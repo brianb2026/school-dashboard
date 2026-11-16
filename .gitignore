@@ -16,3 +16,10 @@ uploads/
 *.sqlite
 *.sqlite-*
 *.db
+
+# Local preview config (points at a scratch data folder)
+.claude/launch.json
+
+# Demo run (npm run demo)
+.demo-data/
+apps/menubar/build/

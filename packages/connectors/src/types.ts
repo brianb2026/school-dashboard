@@ -1,21 +1,24 @@
 import type {
   Announcement,
   Assignment,
-  AttendanceRecord,
+  ContentItem,
   Course,
-  FileRef,
+  CourseFile,
+  CourseOverall,
   GradeEntry,
   GradingScheme,
   Message,
+  OutgoingMessage,
+  SisRecord,
   SourceId,
 } from "@sd/core";
+import type { FetchLike } from "./net.js";
 
 /** What a connector can do. The UI hides buttons for missing capabilities. */
 export type Capability =
   | "courses"
   | "assignments"
   | "grades"
-  | "attendance"
   | "announcements"
   | "messages"
   | "download"
@@ -36,9 +39,35 @@ export interface SyncResult {
   assignments?: Assignment[];
   grades?: GradeEntry[];
   schemes?: GradingScheme[];
-  attendance?: AttendanceRecord[];
+  overall?: CourseOverall[];
   announcements?: Announcement[];
   messages?: Message[];
+  files?: CourseFile[];
+  /** The official record from the student information system. */
+  sis?: SisRecord;
+  /** Each course's content tree, replaced whole on every sync. */
+  contents?: { courseId: string; items: ContentItem[] }[];
+  /**
+   * What this result is the whole truth for. Rows under these id prefixes
+   * that are not in the result get removed, so things deleted at the source
+   * disappear here too.
+   */
+  authoritative?: {
+    assignments?: string[];
+    announcements?: string[];
+    files?: string[];
+    overall?: string[];
+    messages?: boolean;
+  };
+  /** Plain-language notes for the Connections panel ("announcements: not shared with students"). */
+  notes?: string[];
+  /** Things one source learns that another needs. */
+  extras?: {
+    /** Blackboard paths that open Gradescope with your Blackboard sign-in. */
+    gradescopeLaunch?: string[];
+    /** Your first name as your school has it, for the sign-in screen. */
+    studentName?: string;
+  };
 }
 
 export interface SecretStore {
@@ -53,6 +82,11 @@ export interface ConnectorContext {
   /** Courses already known, so later sources can attach to them. */
   knownCourses: Course[];
   now: Date;
+  fetch: FetchLike;
+  timezone: string;
+  termName: string;
+  /** Also fetch the slow-changing things (files, people, grading schemas). */
+  deep: boolean;
 }
 
 export interface Connector {
@@ -60,16 +94,24 @@ export interface Connector {
   readonly label: string;
   readonly capabilities: Capability[];
   status(ctx: ConnectorContext): Promise<ConnectorStatus>;
-  /** Start sign-in. Returns a URL to open, or nothing if no sign-in is needed. */
-  connect?(ctx: ConnectorContext): Promise<{ openUrl?: string }>;
   sync(ctx: ConnectorContext): Promise<SyncResult>;
-  download?(ctx: ConnectorContext, file: FileRef): Promise<Uint8Array>;
-  submit?(ctx: ConnectorContext, assignmentId: string, files: { name: string; bytes: Uint8Array }[]): Promise<void>;
-  sendMessage?(ctx: ConnectorContext, msg: { to: string[]; subject: string; body: string; threadId?: string }): Promise<void>;
+  /** Fetch one course file through this connector's sign-in. */
+  download?(ctx: ConnectorContext, file: CourseFile): Promise<{ bytes: Uint8Array; filename: string }>;
+  sendMessage?(ctx: ConnectorContext, msg: OutgoingMessage): Promise<void>;
 }
 
-export class NotImplementedYet extends Error {
-  constructor(what: string) {
-    super(`${what} is not implemented yet (see docs/roadmap in README.md)`);
+/** The saved sign-in no longer works; the user has to sign in again. */
+export class AuthExpiredError extends Error {
+  constructor(what = "Sign-in expired") {
+    super(what);
+  }
+}
+
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    what = `Request failed (${status})`,
+  ) {
+    super(what);
   }
 }

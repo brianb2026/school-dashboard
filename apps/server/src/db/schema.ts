@@ -3,6 +3,8 @@
  * Each table keeps the typed columns the UI filters/sorts on, plus `data`
  * holding the full record as JSON so the model can grow without migrations.
  * Primary keys are "<source>:<externalId>" so re-syncs upsert instead of duplicating.
+ *
+ * Append only: each entry runs once, tracked with PRAGMA user_version.
  */
 export const MIGRATIONS: string[] = [
   `
@@ -68,5 +70,101 @@ export const MIGRATIONS: string[] = [
     ok INTEGER NOT NULL,
     detail TEXT
   );
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,     -- non-secret settings only; secrets go to the Keychain
+    value TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS course_aliases (
+    pattern TEXT PRIMARY KEY COLLATE NOCASE,
+    course_id TEXT NOT NULL
+  );
+  `,
+  `
+  ALTER TABLE syllabi ADD COLUMN applied TEXT;  -- the reviewed ConfirmSyllabus you saved
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS course_overall (
+    course_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (course_id, source, kind)
+  );
+  CREATE TABLE IF NOT EXISTS attendance_summary (
+    course_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (course_id, source)
+  );
+  CREATE TABLE IF NOT EXISTS files (
+    id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    is_syllabus INTEGER NOT NULL DEFAULT 0,
+    data TEXT NOT NULL
+  );
+  -- Your own marks on an assignment (done, effort, category, hidden); survive every re-sync.
+  CREATE TABLE IF NOT EXISTS assignment_overrides (
+    assignment_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+  );
+  -- What you have already been notified about, so nothing pings twice.
+  CREATE TABLE IF NOT EXISTS notified (
+    key TEXT PRIMARY KEY,
+    at TEXT NOT NULL
+  );
+  ALTER TABLE syllabi ADD COLUMN source_file TEXT;   -- "<file id>@<modified>" when pulled from Blackboard
+  ALTER TABLE syllabi ADD COLUMN content_hash TEXT;
+  ALTER TABLE syllabi ADD COLUMN auto INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE sync_log ADD COLUMN notes TEXT;
+  `,
+  `
+  -- Attendance tracking was removed.
+  DROP TABLE IF EXISTS attendance;
+  DROP TABLE IF EXISTS attendance_summary;
+  `,
+  `
+  -- Announcements you dismissed stay dismissed across re-syncs.
+  ALTER TABLE announcements ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
+  `,
+  `
+  -- Each course's content as Blackboard lays it out (folders, pages, files, tools), replaced on every sync.
+  CREATE TABLE IF NOT EXISTS course_contents (
+    course_id TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    data TEXT NOT NULL
+  );
+  `,
+  `
+  -- The official record from the student information system (one row, replaced on each read).
+  CREATE TABLE IF NOT EXISTS sis_record (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    fetched_at TEXT NOT NULL,
+    data TEXT NOT NULL
+  );
+  `,
+  `
+  -- What changed since you last looked: new grades, moved deadlines, new work, files, announcements.
+  CREATE TABLE IF NOT EXISTS changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    course_id TEXT,
+    ref TEXT,
+    data TEXT NOT NULL,
+    seen INTEGER NOT NULL DEFAULT 0,
+    notified INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS changes_at ON changes (at);
+  -- Text inside course files, for searching them (filled in quietly, a few files at a time).
+  CREATE TABLE IF NOT EXISTS file_text (
+    file_id TEXT PRIMARY KEY,
+    course_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    pages INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL
+  );
+  CREATE VIRTUAL TABLE IF NOT EXISTS file_search USING fts5(file_id UNINDEXED, page UNINDEXED, name, body, tokenize = 'unicode61 remove_diacritics 2');
   `,
 ];
